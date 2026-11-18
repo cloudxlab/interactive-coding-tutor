@@ -304,7 +304,9 @@ def generate_problem(s, direction, topic_hint=None):
         "in the description (markdown). Provide a starter code stub (function signature + docstring + `pass`). "
         "Provide 6-10 test cases including edge cases; each test is {\"call\": \"<python expression calling the function>\", "
         "\"expected\": \"<python expression for expected value>\"}. Tests must be deterministic and use ==-comparable values. "
-        "Do not require input() or printing. Also provide a correct reference_solution (full code defining the function).\n"
+        "IMPORTANT: the function must RETURN its result (never print or use input()), even for absolute beginners: "
+        "for example 'return a greeting string', 'return the sum', 'return True/False'. Each \"call\" and \"expected\" must be a single "
+        "Python expression on one line (no imports, no multiple statements, no stdout capturing). Also provide a correct reference_solution (full code defining the function).\n"
         'Return {"title","description","function_name","starter_code","tests":[...],"reference_solution","difficulty":<int>,"topic"}.'
     )
     user = (

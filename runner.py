@@ -7,6 +7,7 @@ Prints a single line starting with RESULT: followed by JSON.
 Timeouts use a worker thread (not signals) so this works on Windows, macOS and Linux.
 A stuck thread can't be killed, so the process exits with os._exit() once results are printed.
 """
+import ast
 import json
 import os
 import sys
@@ -37,6 +38,18 @@ def run_with_timeout(fn, seconds):
     return "ok", box["ok"]
 
 
+def evaluate(src, ns):
+    """Evaluates a test snippet. A plain expression works; so does a multi-line snippet whose
+    last line is an expression (earlier lines are executed first, e.g. to capture printed output)."""
+    tree = ast.parse(src.strip(), mode="exec")
+    if not tree.body or not isinstance(tree.body[-1], ast.Expr):
+        raise SyntaxError("a test must end with an expression whose value is compared")
+    last = ast.Expression(tree.body[-1].value)
+    tree.body = tree.body[:-1]
+    exec(compile(tree, "<test>", "exec"), ns)
+    return eval(compile(last, "<test>", "eval"), ns)
+
+
 def main():
     with open(sys.argv[1], encoding="utf-8") as f:
         payload = json.load(f)
@@ -56,8 +69,8 @@ def main():
     for t in payload["tests"]:
         r = {"call": t["call"], "expected": t["expected"], "passed": False, "actual": None, "error": None}
         try:
-            expected = eval(t["expected"], ns)
-            status, val = run_with_timeout(lambda: eval(t["call"], ns), PER_TEST_SECONDS)
+            expected = evaluate(t["expected"], ns)
+            status, val = run_with_timeout(lambda: evaluate(t["call"], ns), PER_TEST_SECONDS)
             if status == "timeout":
                 r["error"] = f"Timed out after {PER_TEST_SECONDS}s (infinite loop?)"
             elif status == "error":
