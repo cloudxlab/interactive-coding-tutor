@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -94,9 +95,11 @@ def pick_provider():
         return "anthropic"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
     if shutil.which("claude"):
         return "claude-cli"
-    raise HTTPException(500, "No LLM configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or install the `claude` CLI.")
+    raise HTTPException(500, "No LLM configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY, or install the `claude` CLI.")
 
 
 def _llm_anthropic(system, messages, max_tokens, json_mode=False):
@@ -124,6 +127,42 @@ def _llm_openai(system, messages, max_tokens, json_mode=False):
     return resp.choices[0].message.content
 
 
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5"
+
+
+def _llm_openrouter(system, messages, max_tokens, json_mode=False):
+    """OpenRouter's OpenAI-compatible API (https://openrouter.ai/docs). Plain HTTP, no extra package.
+    json_mode is ignored: not every OpenRouter model supports response_format, and parse_json is lenient."""
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        raise HTTPException(500, "OPENROUTER_API_KEY is not set. Run setup or openrouter_oauth.py.")
+    base = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+    body = json.dumps({
+        "model": os.environ.get("TUTOR_MODEL") or DEFAULT_OPENROUTER_MODEL,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "system", "content": system}] + messages,
+    }).encode()
+    req = urllib.request.Request(base + "/chat/completions", data=body, method="POST", headers={
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": f"http://localhost:{APP_PORT}",  # optional attribution headers OpenRouter recommends
+        "X-Title": "Python Coding Tutor",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:400]
+        hint = " Your key may be invalid or out of credits." if e.code in (401, 402) else ""
+        raise HTTPException(502, f"OpenRouter error {e.code}: {detail}{hint}")
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach OpenRouter: {e}")
+    try:
+        return data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        raise HTTPException(502, f"Unexpected OpenRouter response: {str(data)[:300]}")
+
+
 def _llm_claude_cli(system, messages, max_tokens, json_mode=False):
     """Shells out to `claude -p` (uses the user's existing Claude Code login; no API key needed)."""
     if len(messages) == 1:
@@ -145,7 +184,7 @@ def _llm_claude_cli(system, messages, max_tokens, json_mode=False):
     return p.stdout.strip()
 
 
-PROVIDERS = {"anthropic": _llm_anthropic, "openai": _llm_openai, "claude-cli": _llm_claude_cli}
+PROVIDERS = {"anthropic": _llm_anthropic, "openai": _llm_openai, "openrouter": _llm_openrouter, "claude-cli": _llm_claude_cli}
 
 
 def llm(system, messages, max_tokens=4000, json_mode=False):

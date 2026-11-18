@@ -13,13 +13,14 @@ if [ -f .env ]; then
   done < .env
 fi
 
-# LLM backend: TUTOR_LLM=anthropic|openai|claude-cli, or auto-detect when unset.
+# LLM backend: TUTOR_LLM=anthropic|openai|openrouter|claude-cli, or auto-detect when unset.
 case "${TUTOR_LLM:-}" in
   anthropic) [ -n "${ANTHROPIC_API_KEY:-}" ] || { echo "ANTHROPIC_API_KEY missing. Run ./setup.sh"; exit 1; };;
   openai)    [ -n "${OPENAI_API_KEY:-}" ] || { echo "OPENAI_API_KEY missing. Run ./setup.sh"; exit 1; };;
+  openrouter) [ -n "${OPENROUTER_API_KEY:-}" ] || { echo "OPENROUTER_API_KEY missing. Run ./setup.sh"; exit 1; };;
   claude-cli) command -v claude >/dev/null || { echo "'claude' command not found. Run ./setup.sh"; exit 1; };;
   "")
-    if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || command -v claude >/dev/null; then :
+    if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${OPENROUTER_API_KEY:-}" ] || command -v claude >/dev/null; then :
     else echo "No LLM configured. Run ./setup.sh"; exit 1; fi;;
 esac
 echo "LLM: ${TUTOR_LLM:-auto-detect}"

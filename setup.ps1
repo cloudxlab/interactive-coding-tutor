@@ -70,13 +70,32 @@ function Ask-Key($label, $existing, $prefix) {
     }
 }
 
-$llm = ""; $anthropicKey = ""; $openaiKey = ""
+function Get-OpenRouterKey($existing) {
+    if ($existing) {
+        $keep = Read-Host "OpenRouter key already saved. Keep it? [Y/n]"
+        if ($keep -notmatch "^[nN]") { return $existing }
+    }
+    Write-Host "How do you want to give the tutor your OpenRouter key?"
+    Write-Host "  1) Sign in with my browser (OAuth, recommended: no copy/paste)"
+    Write-Host "  2) I'll paste a key"
+    $how = Read-Host "Choose [1-2]"
+    if ($how -ne "2") {
+        $k = $null
+        try { $k = (& $venvPy openrouter_oauth.py --print-key | Where-Object { $_ } | Select-Object -Last 1) } catch { }
+        if ($k) { return "$k".Trim() }
+        Write-Host "Browser sign-in did not complete. Let's paste a key instead."
+    }
+    return (Ask-Key "OpenRouter" "" "sk-or-")
+}
+
+$llm = ""; $anthropicKey = ""; $openaiKey = ""; $openrouterKey = ""
 while (-not $llm) {
     Write-Host "Which LLM should the tutor use?"
     Write-Host "  1) Anthropic  (API key)"
     Write-Host "  2) OpenAI     (API key)"
-    Write-Host "  3) claude command line (uses your Claude Code login, no key needed)"
-    $choice = Read-Host "Choose [1-3]"
+    Write-Host "  3) OpenRouter (API key or browser sign-in; many models)"
+    Write-Host "  4) claude command line (uses your Claude Code login, no key needed)"
+    $choice = Read-Host "Choose [1-4]"
     switch ($choice) {
         "1" {
             $llm = "anthropic"
@@ -112,6 +131,20 @@ while (-not $llm) {
             & $venvPy -m pip install -q openai
         }
         "3" {
+            $llm = "openrouter"
+            if (-not $old["OPENROUTER_API_KEY"]) {
+                Write-Host ""
+                Write-Host "--- How to get an OpenRouter API key ---"
+                Write-Host "OpenRouter is one account that gives you access to many AI models (Claude, GPT, Gemini, ...)."
+                Write-Host "  1. Go to https://openrouter.ai and sign in (or create an account)."
+                Write-Host "  2. Add credits at https://openrouter.ai/settings/credits (pay-as-you-go; some models are free)."
+                Write-Host "  3. EITHER let this script sign you in through your browser (easiest), OR create a key yourself at"
+                Write-Host "     https://openrouter.ai/settings/keys ('Create Key') and copy it (it starts with 'sk-or-')."
+                Write-Host ""
+            }
+            $openrouterKey = Get-OpenRouterKey $old["OPENROUTER_API_KEY"]
+        }
+        "4" {
             if (Get-Command claude -ErrorAction SilentlyContinue) { $llm = "claude-cli" }
             else {
                 Write-Host "The 'claude' command was not found."
@@ -125,15 +158,21 @@ while (-not $llm) {
                 Write-Host ""
             }
         }
-        default { Write-Host "Please enter 1, 2 or 3."; Write-Host "" }
+        default { Write-Host "Please enter 1, 2, 3 or 4."; Write-Host "" }
     }
 }
 
-$model = Read-Host "Model override (press Enter for the default)"
+if ($llm -eq "openrouter") {
+    Write-Host "OpenRouter model ids look like provider/model (browse https://openrouter.ai/models)."
+    $model = Read-Host "Model (press Enter for anthropic/claude-sonnet-4.5)"
+} else {
+    $model = Read-Host "Model override (press Enter for the default)"
+}
 
 $lines = @("TUTOR_LLM=$llm")
 if ($anthropicKey) { $lines += "ANTHROPIC_API_KEY='$anthropicKey'" }
 if ($openaiKey)    { $lines += "OPENAI_API_KEY='$openaiKey'" }
+if ($openrouterKey) { $lines += "OPENROUTER_API_KEY='$openrouterKey'" }
 if ($model)        { $lines += "TUTOR_MODEL='$model'" }
 [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot ".env"), (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))
 

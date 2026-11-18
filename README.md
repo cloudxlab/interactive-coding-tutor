@@ -62,6 +62,7 @@ The tutor needs an AI to create problems and answer your questions. Pick **one**
 |---|---|---|
 | **Anthropic (Claude) API key** | An account at console.anthropic.com | Pay-as-you-go. Typically a few cents per hour of practice. |
 | **OpenAI API key** | An account at platform.openai.com. (A ChatGPT subscription is *not* enough.) | Pay-as-you-go. Typically a few cents per hour of practice. |
+| **OpenRouter** | An account at openrouter.ai. You can sign in through your browser during setup (no key to copy), or paste a key. One account gives access to many models (Claude, GPT, Gemini and more), and some are free. | Pay-as-you-go, depending on the model you pick. |
 | **`claude` command line** | A paid Claude subscription (Pro or Max) and the Claude Code app installed and signed in | Covered by your subscription. No key to copy. |
 
 An **API key** is a long password-like text that lets the app use the AI on your account. Keep it private. Never share it or post it online.
@@ -75,7 +76,7 @@ The setup script shows the exact steps to get a key when you choose that option.
    bash setup.sh
    ```
 3. Wait while it installs things (a few minutes). Then answer the questions:
-   - Choose `1`, `2` or `3` for your AI and follow the on-screen steps.
+   - Choose `1`, `2`, `3` or `4` for your AI and follow the on-screen steps.
    - When it asks for your key, **paste it** (`Cmd + V`). You won't see anything appear. That's normal and it's for your safety. Press `Enter`.
    - Press `Enter` at "Model override" to use the default.
 
@@ -122,7 +123,7 @@ Same as for Mac. See the [table above](#step-3--choose-your-ai). `setup` will as
 2. **Double-click `setup.bat`.**
    - If Windows shows a blue **"Windows protected your PC"** screen: click **More info** → **Run anyway**. (This appears for any downloaded script.)
 3. A black window opens and installs things (a few minutes). Then answer the questions:
-   - Type `1`, `2` or `3` for your AI and press `Enter`. Follow the on-screen steps.
+   - Type `1`, `2`, `3` or `4` for your AI and press `Enter`. Follow the on-screen steps.
    - When it asks for your key, **paste it** (right-click in the window, or `Ctrl + V`). You won't see anything appear. That's normal. Press `Enter`.
    - Press `Enter` at "Model override" to use the default.
 4. When you see **"Setup complete"**, press any key to close the window.
@@ -186,11 +187,44 @@ python3 -m venv .venv
 .venv/bin/python app.py                             # Windows: .venv\Scripts\python app.py
 ```
 
-**LLM backend** (auto-detected in this order, or force with `TUTOR_LLM=anthropic|openai|claude-cli`):
-`ANTHROPIC_API_KEY` → `OPENAI_API_KEY` (needs `pip install openai`) → the `claude` command (uses your Claude Code login).
+**LLM backend** (auto-detected in this order, or force with `TUTOR_LLM=anthropic|openai|openrouter|claude-cli`):
+`ANTHROPIC_API_KEY` → `OPENAI_API_KEY` (needs `pip install openai`) → `OPENROUTER_API_KEY` → the `claude` command (uses your Claude Code login).
+
+### OpenRouter
+
+OpenRouter's OpenAI-compatible API is called directly over HTTPS (no extra package). Settings, in `.env` or your environment:
+
+| Variable | Meaning |
+|---|---|
+| `OPENROUTER_API_KEY` | your key (`sk-or-...`) |
+| `TUTOR_MODEL` | model id as `provider/model`, e.g. `anthropic/claude-sonnet-4.5` (default), `openai/gpt-4.1`. Browse <https://openrouter.ai/models> |
+| `OPENROUTER_BASE_URL` | optional, default `https://openrouter.ai/api/v1` |
+
+Easiest path: run `./setup.sh` (or `setup.bat`) and choose **3) OpenRouter**.
+
+### OpenRouter OAuth helper (`openrouter_oauth.py`)
+
+Gets an API key by signing in with OpenRouter (OAuth **PKCE**). No copy/paste and no client secret. Standard library only.
+
+```
+python openrouter_oauth.py                # sign in, save OPENROUTER_API_KEY and TUTOR_LLM=openrouter to .env
+python openrouter_oauth.py --print-key    # sign in, print only the key (for scripts; setup.sh uses this)
+python openrouter_oauth.py --manual       # no local server: paste the code from the redirect URL
+python openrouter_oauth.py --no-browser   # print the sign-in URL instead of opening a browser
+python openrouter_oauth.py --env-file X   # save somewhere other than .env
+```
+
+How the flow works:
+1. The script creates a random `code_verifier` and sends its SHA-256 hash (`code_challenge`, method `S256`) to `https://openrouter.ai/auth?callback_url=...`.
+2. Your browser opens; you sign in and click **Authorize**.
+3. OpenRouter redirects to `http://localhost:3000/?code=...`, where the script is listening. (OpenRouter allows `http://localhost:3000` for development and requires https for everything else. If port 3000 is busy, free it or use `--manual`.)
+4. The script POSTs `{code, code_verifier, code_challenge_method}` to `https://openrouter.ai/api/v1/auth/keys` and receives `{"key": "sk-or-..."}`.
+5. The key is written to `.env` (other lines preserved, file mode 600).
+
+To build a *hosted* app that signs users in with OpenRouter, reuse `make_pkce()`, `build_auth_url()` and `exchange_code()` from that file, and register an https `callback_url` on your own domain.
 
 **Environment variables:** `TUTOR_PORT` (8765), `TUTOR_JUPYTER_PORT` (8766), `TUTOR_MODEL` (optional model override).
 
-**Files:** `app.py` (backend + AI + JupyterLab launcher), `runner.py` (runs your code and the tests in a separate process), `static/index.html` (the web UI), `setup.sh`/`launch.sh` (Mac/Linux), `setup.ps1`/`launch.ps1` + `.bat` wrappers (Windows). Progress is saved in `state.json`, notebooks in `workspace/`, your settings and key in `.env` (not committed to git).
+**Files:** `app.py` (backend + AI + JupyterLab launcher), `runner.py` (runs your code and the tests in a separate process), `static/index.html` (the web UI), `openrouter_oauth.py` (OpenRouter sign-in helper), `setup.sh`/`launch.sh` (Mac/Linux), `setup.ps1`/`launch.ps1` + `.bat` wrappers (Windows). Progress is saved in `state.json`, notebooks in `workspace/`, your settings and key in `.env` (not committed to git).
 
 **Notes:** your code runs locally in a plain subprocess with no sandbox, which is fine for a single-user local tool. Tests run on the *saved* notebook file. The Windows scripts are newer than the Mac/Linux ones, so please report any problems.
