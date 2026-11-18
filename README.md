@@ -2,6 +2,8 @@
 
 Learn Python by solving coding problems, with an AI tutor beside you.
 
+![Python Tutor: chat with your tutor on the left, Jupyter notebook on the right](docs/screenshot.png)
+
 - **Left side:** a chat with your tutor. Ask for hints, explanations, or the next problem.
 - **Right side:** a Jupyter notebook where you write and run your code.
 
