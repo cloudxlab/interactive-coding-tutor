@@ -26,7 +26,7 @@ def run_with_timeout(fn, seconds):
             box["ok"] = fn()
         except BaseException as e:
             box["error"] = e
-            box["tb"] = traceback.format_exc(limit=3)
+            box["tb"] = clean_tb(e)
 
     t = threading.Thread(target=target, daemon=True)
     t.start()
@@ -36,6 +36,15 @@ def run_with_timeout(fn, seconds):
     if "error" in box:
         return "error", box
     return "ok", box["ok"]
+
+
+def clean_tb(exc):
+    """Traceback limited to the learner's own code (cells / tests), without this runner's internals."""
+    frames = [f for f in traceback.extract_tb(exc.__traceback__) if f.filename.startswith("<")]
+    lines = ["Traceback (most recent call last):"] if frames else []
+    lines += [l.rstrip("\n") for l in traceback.format_list(frames)]
+    lines += [l.rstrip("\n") for l in traceback.format_exception_only(type(exc), exc)]
+    return "\n".join(lines)
 
 
 def evaluate(src, ns):
@@ -55,16 +64,20 @@ def main():
         payload = json.load(f)
 
     ns = {"__name__": "__main__"}
-    out = {"load_error": None, "results": []}
+    out = {"load_error": None, "cell_errors": [], "results": []}
 
-    status, val = run_with_timeout(
-        lambda: exec(compile(payload["code"], "<your notebook>", "exec"), ns), PER_TEST_SECONDS * 2)
-    if status == "timeout":
-        out["load_error"] = f"Your code did not finish within {PER_TEST_SECONDS * 2}s (infinite loop outside a function?)."
-    elif status == "error":
-        out["load_error"] = val["tb"]
-    if out["load_error"]:
-        return out
+    # Run each notebook cell on its own, in one shared namespace, like Jupyter does. A scratch cell that
+    # raises (e.g. uses an undefined variable) is reported but must not stop the other cells or the tests.
+    cells = payload.get("cells") or [payload.get("code", "")]
+    for i, src in enumerate(cells, 1):
+        if not src.strip():
+            continue
+        status, val = run_with_timeout(lambda: exec(compile(src, f"<cell {i}>", "exec"), ns), PER_TEST_SECONDS * 2)
+        if status == "timeout":
+            out["cell_errors"].append({"cell": i, "error": f"Cell {i} did not finish within {PER_TEST_SECONDS * 2}s "
+                                                           "(infinite loop outside a function?)."})
+        elif status == "error":
+            out["cell_errors"].append({"cell": i, "error": val["tb"]})
 
     for t in payload["tests"]:
         r = {"call": t["call"], "expected": t["expected"], "passed": False, "actual": None, "error": None}

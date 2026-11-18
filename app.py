@@ -289,32 +289,34 @@ def create_notebook(pid, title, description, starter):
 
 def notebook_code(name):
     nb = nbformat.read(WORKSPACE / name, as_version=4)
-    lines = []
+    cells = []
     for cell in nb.cells:
         if cell.cell_type == "code":
             # drop IPython magics / shell escapes; they aren't valid plain Python
-            lines.append("\n".join(l for l in cell.source.splitlines() if not l.lstrip().startswith(("%", "!"))))
-    return "\n\n".join(lines)
+            cells.append("\n".join(l for l in cell.source.splitlines() if not l.lstrip().startswith(("%", "!"))))
+    return cells
 
 
 # ----------------------------------------------------------------------------
 # Running tests
 # ----------------------------------------------------------------------------
 def run_tests(code, tests):
+    """code: one source string, or a list of notebook cell sources (each run separately)."""
+    cells = [code] if isinstance(code, str) else code
     with tempfile.TemporaryDirectory() as d:
         payload = Path(d) / "payload.json"
-        payload.write_text(json.dumps({"code": code, "tests": tests}), encoding="utf-8")
+        payload.write_text(json.dumps({"cells": cells, "tests": tests}), encoding="utf-8")
         try:
             p = subprocess.run(
                 [sys.executable, "-I", str(ROOT / "runner.py"), str(payload)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=40, stdin=subprocess.DEVNULL, cwd=d,
             )
         except subprocess.TimeoutExpired:
-            return {"load_error": "Your code took too long to run (over 40s). Check for infinite loops.", "results": []}
+            return {"load_error": "Your code took too long to run (over 40s). Check for infinite loops.", "cell_errors": [], "results": []}
     for line in reversed(p.stdout.splitlines()):
         if line.startswith("RESULT:"):
             return json.loads(line[len("RESULT:"):])
-    return {"load_error": (p.stderr or "Runner crashed")[-1500:], "results": []}
+    return {"load_error": (p.stderr or "Runner crashed")[-1500:], "cell_errors": [], "results": []}
 
 
 # ----------------------------------------------------------------------------
@@ -363,7 +365,7 @@ def generate_problem(s, direction, topic_hint=None):
             assert all("call" in t and "expected" in t for t in prob["tests"]), "bad test shape"
             # Validate the generated tests against the reference solution before showing them to the learner.
             res = run_tests(prob["reference_solution"], prob["tests"])
-            assert not res["load_error"], res["load_error"]
+            assert not res["load_error"] and not res["cell_errors"], res["load_error"] or res["cell_errors"][0]["error"]
             bad = [r for r in res["results"] if not r["passed"]]
             assert not bad, f"reference solution fails tests: {bad[:2]}"
             prob["description"] = re.sub(r"\A\s*#{1,6}[ \t]+[^\n]*\n+", "", prob["description"])
@@ -458,18 +460,21 @@ def check():
         if not cur:
             raise HTTPException(400, "No active problem.")
         try:
-            code = notebook_code(cur["notebook"])
+            cells = notebook_code(cur["notebook"])
         except Exception as e:
             raise HTTPException(500, f"Could not read notebook: {e}")
-        result = run_tests(code, cur["tests"])
+        result = run_tests(cells, cur["tests"])
+        code = "\n\n".join(cells)
         cur["attempts"] += 1
         n_pass = sum(r["passed"] for r in result["results"])
         total = len(cur["tests"])
-        passed = not result["load_error"] and n_pass == total
+        passed = not result["load_error"] and total > 0 and n_pass == total
         cur["passed"] = passed
         details = result["load_error"] or "; ".join(
             f'{r["call"]} -> {r["actual"] or r["error"]} (expected {r["expected"]})' for r in result["results"] if not r["passed"]
         )
+        if result["cell_errors"]:
+            details += " | Cell errors: " + "; ".join(f'cell {e["cell"]}: {e["error"].splitlines()[-1]}' for e in result["cell_errors"])
         outcome = f'Problem "{cur["title"]}" (difficulty {cur["difficulty"]}): ' + (
             f"PASSED all {total} tests on attempt {cur['attempts']}." if passed else f"{n_pass}/{total} tests passed. Failures: {details[:800]}"
         )

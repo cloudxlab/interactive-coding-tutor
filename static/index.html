@@ -141,6 +141,11 @@ function resultHtml(m) {
   let h = md(m.content);
   const r = m.result;
   if (r.load_error) h += `<pre class="err"><code>${esc(r.load_error)}</code></pre>`;
+  if (r.cell_errors?.length) {
+    h += `<p><b>${r.cell_errors.length === 1 ? 'A notebook cell raised an error' : 'Some notebook cells raised errors'}</b> ` +
+         `(skipped; your other cells were still tested):</p>` +
+         r.cell_errors.map(e => `<pre class="err"><code>${esc(e.error)}</code></pre>`).join('');
+  }
   if (r.results.length) {
     const n = r.results.filter(x => x.passed).length;
     h += `<b>${n}/${r.results.length} tests passed</b><table class="tests">` + r.results.map(x =>
