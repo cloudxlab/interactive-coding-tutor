@@ -5,3 +5,5 @@ workspace/
 jlab_settings/
 jupyter.log
 __pycache__/
+data/
+.env.multiuser

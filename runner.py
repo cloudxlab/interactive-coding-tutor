@@ -1,6 +1,6 @@
 """Executes a learner's code and test cases in an isolated subprocess.
 
-Usage: python -I runner.py <payload.json>
+Usage: python -I runner.py <payload.json>      (or "-" to read the JSON payload from stdin)
 payload = {"code": str, "tests": [{"call": str, "expected": str}]}
 Prints a single line starting with RESULT: followed by JSON.
 
@@ -60,8 +60,11 @@ def evaluate(src, ns):
 
 
 def main():
-    with open(sys.argv[1], encoding="utf-8") as f:
-        payload = json.load(f)
+    if sys.argv[1] == "-":
+        payload = json.load(sys.stdin)
+    else:
+        with open(sys.argv[1], encoding="utf-8") as f:
+            payload = json.load(f)
 
     ns = {"__name__": "__main__"}
     out = {"load_error": None, "cell_errors": [], "results": []}
@@ -99,7 +102,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # The learner's prints are never shown, so discard them (a print-forever loop must not flood memory/pipes).
+    # Only the RESULT line goes to the real stdout.
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr = open(os.devnull, "w")
     result = main()
-    print("RESULT:" + json.dumps(result), flush=True)
-    sys.stdout.flush()
+    real_stdout.write("RESULT:" + json.dumps(result) + "\n")
+    real_stdout.flush()
     os._exit(0)

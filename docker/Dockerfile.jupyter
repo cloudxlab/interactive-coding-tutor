@@ -1,0 +1,16 @@
+# Per-user environment: JupyterLab for the notebook, and the sandbox that runs the tests (runner.py).
+# Build:  docker build -t coding-tutor-jupyter -f docker/Dockerfile.jupyter .
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+RUN pip install jupyterlab ipykernel \
+ && useradd -m -u 10001 -s /usr/sbin/nologin learner \
+ && mkdir -p /work /opt/tutor/jlab_settings \
+ && chown 10001:10001 /work
+COPY runner.py /opt/tutor/runner.py
+COPY docker/overrides.json /opt/tutor/jlab_settings/overrides.json
+COPY docker/jupyter_server_config.py /opt/tutor/jupyter_server_config.py
+COPY docker/start.sh /opt/tutor/start.sh
+USER 10001:10001
+WORKDIR /work
+EXPOSE 8888
+CMD ["/opt/tutor/start.sh"]

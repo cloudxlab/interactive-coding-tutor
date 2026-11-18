@@ -1,4 +1,9 @@
-"""Interactive Python coding tutor: chat (left) + JupyterLab (right)."""
+"""Interactive Python coding tutor: chat (left) + JupyterLab (right).
+
+Two modes (TUTOR_MODE): "local" (default, single user, no sign-in) and "multiuser" (OAuth sign-in, per-user data,
+one sandboxed Jupyter per user behind an authenticated proxy; see docs/MULTIUSER.md).
+"""
+import contextvars
 import json
 import os
 import re
@@ -11,16 +16,19 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import nbformat
 import uvicorn
 from anthropic import Anthropic
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+import sandbox
 
 ROOT = Path(__file__).parent
 WORKSPACE = ROOT / "workspace"
@@ -29,8 +37,18 @@ APP_PORT = int(os.environ.get("TUTOR_PORT", "8765"))
 JUPYTER_PORT = int(os.environ.get("TUTOR_JUPYTER_PORT", "8766"))
 JUPYTER_TOKEN = secrets.token_urlsafe(16)
 MAX_LEVEL = 10
+MULTIUSER = os.environ.get("TUTOR_MODE", "local").lower() == "multiuser"
+BASE_URL = os.environ.get("TUTOR_BASE_URL", "").rstrip("/")
+LLM_CALLS_PER_HOUR = int(os.environ.get("TUTOR_LLM_CALLS_PER_HOUR", "120"))
+MAX_ONBOARD_CHARS, MAX_CHAT_CHARS = 2000, 4000
 
+store = None    # multi-user: SQLite store
+manager = None  # multi-user: per-user Jupyter environments
 _lock = threading.RLock()
+_user_locks = {}
+_user_locks_guard = threading.Lock()
+_uid_var = contextvars.ContextVar("uid", default=None)  # who the current request belongs to (for rate limiting)
+_llm_calls = {}
 _client = None
 _jupyter_proc = None
 
@@ -52,16 +70,35 @@ def default_state():
     }
 
 
-def load_state():
+def user_lock(uid):
+    """One lock per user: a user's requests are serialized, but slow LLM calls never block other users."""
+    with _user_locks_guard:
+        return _user_locks.setdefault(str(uid), threading.RLock())
+
+
+def load_state(uid):
+    if MULTIUSER:
+        saved = store.load_state(uid)
+        return {**default_state(), **saved} if saved else default_state()
     with _lock:
         if STATE_FILE.exists():
             return {**default_state(), **json.loads(STATE_FILE.read_text(encoding="utf-8"))}
         return default_state()
 
 
-def save_state(s):
+def save_state(uid, s):
+    if MULTIUSER:
+        store.save_state(uid, s)
+        return
     with _lock:
         STATE_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
+
+
+def delete_state(uid):
+    if MULTIUSER:
+        store.delete_state(uid)
+    else:
+        STATE_FILE.unlink(missing_ok=True)
 
 
 def public_state(s):
@@ -86,9 +123,27 @@ def public_state(s):
 # ----------------------------------------------------------------------------
 # LLM
 # ----------------------------------------------------------------------------
+def rate_limit_llm():
+    """Multi-user: cap LLM calls per user per hour so one account can't run up the operator's bill."""
+    uid = _uid_var.get()
+    if not MULTIUSER or uid is None:
+        return
+    now = time.time()
+    calls = _llm_calls.setdefault(uid, deque())
+    while calls and now - calls[0] > 3600:
+        calls.popleft()
+    if len(calls) >= LLM_CALLS_PER_HOUR:
+        raise HTTPException(429, "You've reached the hourly usage limit. Please take a break and try again later.")
+    calls.append(now)
+
+
 def pick_provider():
     """TUTOR_LLM = anthropic | openai | claude-cli, else auto-detect from keys / the `claude` command."""
     choice = os.environ.get("TUTOR_LLM", "").lower()
+    if MULTIUSER and (choice == "claude-cli" or not choice and not (
+            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY"))):
+        raise HTTPException(500, "Multi-user mode needs an API-key provider (anthropic, openai or openrouter); "
+                                 "the `claude` command uses one person's login and can't be shared.")
     if choice:
         return choice
     if os.environ.get("ANTHROPIC_API_KEY"):
@@ -188,6 +243,7 @@ PROVIDERS = {"anthropic": _llm_anthropic, "openai": _llm_openai, "openrouter": _
 
 
 def llm(system, messages, max_tokens=4000, json_mode=False):
+    rate_limit_llm()
     provider = pick_provider()
     if provider not in PROVIDERS:
         raise HTTPException(500, f"Unknown TUTOR_LLM '{provider}'. Use one of: {', '.join(PROVIDERS)}.")
@@ -230,6 +286,8 @@ def llm_json(system, user, max_tokens=4000):
 # Jupyter
 # ----------------------------------------------------------------------------
 def notebook_url(name):
+    if MULTIUSER:
+        return f"{sandbox.BASE_PATH}doc/tree/{name}"  # served by our authenticated proxy, same origin as the app
     return f"http://localhost:{JUPYTER_PORT}/doc/tree/{name}?token={JUPYTER_TOKEN}"
 
 
@@ -273,7 +331,20 @@ def stop_jupyter():
             _jupyter_proc.kill()
 
 
-def create_notebook(pid, title, description, starter):
+def _sandbox_call(fn, *args):
+    try:
+        return fn(*args)
+    except sandbox.SandboxError as e:
+        raise HTTPException(503, str(e))
+
+
+def _user_env(uid):
+    """(upstream base url, token) of this user's Jupyter, starting it if necessary."""
+    user = store.get_user(uid)
+    return _sandbox_call(manager.ensure, user["id"], user["jupyter_token"]), user["jupyter_token"]
+
+
+def create_notebook(uid, pid, title, description, starter):
     name = f"problem_{pid:03d}.ipynb"
     nb = nbformat.v4.new_notebook()
     nb.cells = [
@@ -283,11 +354,18 @@ def create_notebook(pid, title, description, starter):
         nbformat.v4.new_code_cell(starter),
     ]
     nb.metadata["kernelspec"] = {"display_name": "Python 3", "language": "python", "name": "python3"}
-    nbformat.write(nb, WORKSPACE / name)
+    if MULTIUSER:
+        base, token = _user_env(uid)
+        _sandbox_call(sandbox.put_notebook, base, token, name, json.loads(nbformat.writes(nb)))
+    else:
+        nbformat.write(nb, WORKSPACE / name)
     return name
 
 
-def notebook_code(name):
+def notebook_code(uid, name):
+    if MULTIUSER:
+        base, token = _user_env(uid)
+        return _sandbox_call(sandbox.get_notebook_cells, base, token, name)
     nb = nbformat.read(WORKSPACE / name, as_version=4)
     cells = []
     for cell in nb.cells:
@@ -301,22 +379,9 @@ def notebook_code(name):
 # Running tests
 # ----------------------------------------------------------------------------
 def run_tests(code, tests):
-    """code: one source string, or a list of notebook cell sources (each run separately)."""
-    cells = [code] if isinstance(code, str) else code
-    with tempfile.TemporaryDirectory() as d:
-        payload = Path(d) / "payload.json"
-        payload.write_text(json.dumps({"cells": cells, "tests": tests}), encoding="utf-8")
-        try:
-            p = subprocess.run(
-                [sys.executable, "-I", str(ROOT / "runner.py"), str(payload)],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=40, stdin=subprocess.DEVNULL, cwd=d,
-            )
-        except subprocess.TimeoutExpired:
-            return {"load_error": "Your code took too long to run (over 40s). Check for infinite loops.", "cell_errors": [], "results": []}
-    for line in reversed(p.stdout.splitlines()):
-        if line.startswith("RESULT:"):
-            return json.loads(line[len("RESULT:"):])
-    return {"load_error": (p.stderr or "Runner crashed")[-1500:], "cell_errors": [], "results": []}
+    """code: one source string, or a list of notebook cell sources (each run separately).
+    Multi-user mode runs them in a throwaway Docker sandbox (no network, no secrets)."""
+    return _sandbox_call(sandbox.run_tests, code, tests, MULTIUSER and sandbox.ISOLATION == "docker")
 
 
 # ----------------------------------------------------------------------------
@@ -376,11 +441,11 @@ def generate_problem(s, direction, topic_hint=None):
     raise HTTPException(502, f"Could not generate a valid problem: {last_err}")
 
 
-def issue_problem(s, direction, topic_hint=None):
+def issue_problem(uid, s, direction, topic_hint=None):
     prob = generate_problem(s, direction, topic_hint)
     s["counter"] += 1
     pid = s["counter"]
-    nb = create_notebook(pid, prob["title"], prob["description"], prob["starter_code"])
+    nb = create_notebook(uid, pid, prob["title"], prob["description"], prob["starter_code"])
     s["current"] = {
         "id": pid,
         "title": prob["title"],
@@ -411,14 +476,79 @@ def update_knowledge(s, outcome_text):
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
+def start_background_env(uid):
+    """Warm up the user's Jupyter while the LLM works, so first sign-in feels faster."""
+    if MULTIUSER:
+        user = store.get_user(uid)
+        threading.Thread(target=lambda: _quiet(manager.ensure, user["id"], user["jupyter_token"]), daemon=True).start()
+
+
+def _quiet(fn, *args):
+    try:
+        fn(*args)
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app):
-    start_jupyter()
+    if MULTIUSER:
+        if sandbox.ISOLATION == "docker":
+            try:
+                sandbox.check_docker_ready()
+            except sandbox.SandboxError as e:
+                raise RuntimeError(str(e))
+        else:
+            print("WARNING: TUTOR_ISOLATION=none. Users are NOT isolated from each other or the server. "
+                  "Only use this for people you fully trust, never on the public internet.", flush=True)
+        manager.start_reaper()
+    else:
+        start_jupyter()
     yield
-    stop_jupyter()
+    if MULTIUSER:
+        manager.shutdown()
+    else:
+        stop_jupyter()
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+def setup_multiuser(app):
+    """Everything that only exists in multi-user mode: sessions, OAuth routes, the Jupyter proxy, guards."""
+    global store, manager
+    import auth
+    import proxy
+    from starlette.middleware.sessions import SessionMiddleware
+    from store import Store
+
+    secret = os.environ.get("TUTOR_SECRET_KEY", "")
+    if len(secret) < 32:
+        raise RuntimeError("TUTOR_SECRET_KEY must be set to a random string of at least 32 characters "
+                           "(e.g. python -c \"import secrets; print(secrets.token_urlsafe(48))\").")
+    if not BASE_URL.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        raise RuntimeError("TUTOR_BASE_URL must be the public https URL of this app (http is only allowed for localhost).")
+    store = Store(sandbox.DATA_DIR / "tutor.db")
+    manager = sandbox.make_manager()
+    auth.init(store)
+    if not auth.providers():
+        raise RuntimeError("No sign-in provider configured. Set GOOGLE_*, GITHUB_* and/or MICROSOFT_* client id/secret.")
+    proxy.init(manager, BASE_URL)
+    auth.origin_guard(app, BASE_URL)
+    auth.security_headers(app)
+    app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="tutor_session", max_age=7 * 24 * 3600,
+                       same_site="lax", https_only=BASE_URL.startswith("https://"))
+    app.include_router(auth.router)
+    app.include_router(proxy.router)
+    return auth
+
+
+_auth = setup_multiuser(app) if MULTIUSER else None
+
+
+def current_user(request: Request):
+    """Who is calling. Local mode has exactly one implicit user."""
+    return _auth.require_user(request) if MULTIUSER else {"id": "local"}
 
 
 class Onboard(BaseModel):
@@ -429,16 +559,30 @@ class Chat(BaseModel):
     message: str
 
 
+@app.get("/api/me")
+def me(request: Request):
+    if not MULTIUSER:
+        return {"mode": "local", "user": {"name": "You"}, "providers": []}
+    u = _auth.session_user(request)
+    user = {"name": u["name"] or u["email"] or "Learner", "avatar": u["avatar"], "provider": u["provider"]} if u else None
+    return {"mode": "multiuser", "user": user, "providers": _auth.providers()}
+
+
 @app.get("/api/state")
-def get_state():
-    return public_state(load_state())
+def get_state(user=Depends(current_user)):
+    return public_state(load_state(user["id"]))
 
 
 @app.post("/api/onboard")
-def onboard(body: Onboard):
+def onboard(body: Onboard, user=Depends(current_user)):
+    uid = user["id"]
+    _uid_var.set(uid)  # must be set here (the endpoint's own thread), not in the dependency
     if not body.text.strip():
         raise HTTPException(400, "Please describe your Python knowledge.")
-    with _lock:
+    if len(body.text) > MAX_ONBOARD_CHARS:
+        raise HTTPException(400, f"Please keep this under {MAX_ONBOARD_CHARS} characters.")
+    with user_lock(uid):
+        start_background_env(uid)
         s = default_state()
         a = assess_beginner(body.text)
         s["onboarded"] = True
@@ -447,20 +591,24 @@ def onboard(body: Onboard):
         s["level"] = max(1, min(MAX_LEVEL, int(a.get("level", 1))))
         s["knowledge_log"].append({"t": int(time.time()), "knowledge": a["knowledge"], "level": s["level"]})
         s["chat"].append({"role": "assistant", "content": f"Thanks! Here's where I think you're starting:\n\n{a['knowledge']}\n\nLet's begin."})
-        issue_problem(s, "starting problem", a.get("topic"))
-        save_state(s)
+        issue_problem(uid, s, "starting problem", a.get("topic"))
+        save_state(uid, s)
         return public_state(s)
 
 
 @app.post("/api/check")
-def check():
-    with _lock:
-        s = load_state()
+def check(user=Depends(current_user)):
+    uid = user["id"]
+    _uid_var.set(uid)  # must be set here (the endpoint's own thread), not in the dependency
+    with user_lock(uid):
+        s = load_state(uid)
         cur = s["current"]
         if not cur:
             raise HTTPException(400, "No active problem.")
         try:
-            cells = notebook_code(cur["notebook"])
+            cells = notebook_code(uid, cur["notebook"])
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(500, f"Could not read notebook: {e}")
         result = run_tests(cells, cur["tests"])
@@ -486,14 +634,16 @@ def check():
         else:
             msg = "Not quite yet. Review the failures below, fix your code, and run the tests again. Ask me for a hint if you're stuck."
         s["chat"].append({"role": "assistant", "kind": "result", "content": msg, "result": result, "passed": passed})
-        save_state(s)
+        save_state(uid, s)
         return {"state": public_state(s), "result": result, "passed": passed}
 
 
 @app.post("/api/next")
-def next_problem(skip: bool = False):
-    with _lock:
-        s = load_state()
+def next_problem(skip: bool = False, user=Depends(current_user)):
+    uid = user["id"]
+    _uid_var.set(uid)  # must be set here (the endpoint's own thread), not in the dependency
+    with user_lock(uid):
+        s = load_state(uid)
         cur = s["current"]
         if cur and skip and not cur["passed"]:
             s["history"].append({"id": cur["id"], "title": cur["title"], "difficulty": cur["difficulty"], "result": "skipped"})
@@ -503,15 +653,19 @@ def next_problem(skip: bool = False):
                               f"For reference, one way to solve the last one:\n\n```python\n{cur['reference_solution']}\n```"})
         elif cur and not cur["passed"]:
             raise HTTPException(400, "Solve the current problem first, or ask for an easier one.")
-        issue_problem(s, "easier than before" if skip else "harder than before")
-        save_state(s)
+        issue_problem(uid, s, "easier than before" if skip else "harder than before")
+        save_state(uid, s)
         return public_state(s)
 
 
 @app.post("/api/chat")
-def chat(body: Chat):
-    with _lock:
-        s = load_state()
+def chat(body: Chat, user=Depends(current_user)):
+    uid = user["id"]
+    _uid_var.set(uid)  # must be set here (the endpoint's own thread), not in the dependency
+    if len(body.message) > MAX_CHAT_CHARS:
+        raise HTTPException(400, f"Please keep messages under {MAX_CHAT_CHARS} characters.")
+    with user_lock(uid):
+        s = load_state(uid)
         s["chat"].append({"role": "user", "content": body.message})
         cur = s["current"]
         system = (
@@ -527,19 +681,25 @@ def chat(body: Chat):
             msgs.pop(0)
         reply = llm(system, msgs, max_tokens=1200)
         s["chat"].append({"role": "assistant", "content": reply})
-        save_state(s)
+        save_state(uid, s)
         return {"reply": reply}
 
 
 @app.post("/api/reset")
-def reset():
-    with _lock:
-        STATE_FILE.unlink(missing_ok=True)
+def reset(user=Depends(current_user)):
+    with user_lock(user["id"]):
+        delete_state(user["id"])
     return {"ok": True}
 
 
 app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="static")
 
 if __name__ == "__main__":
-    print(f"\n  Coding tutor running at http://localhost:{APP_PORT}\n")
-    uvicorn.run(app, host="127.0.0.1", port=APP_PORT)
+    if MULTIUSER:
+        host = os.environ.get("TUTOR_HOST", "127.0.0.1")
+        print(f"\n  Coding tutor (multi-user) listening on {host}:{APP_PORT}, public URL {BASE_URL}\n")
+        uvicorn.run(app, host=host, port=APP_PORT, proxy_headers=True,
+                    forwarded_allow_ips=os.environ.get("TUTOR_FORWARDED_ALLOW_IPS", "127.0.0.1"))
+    else:
+        print(f"\n  Coding tutor running at http://localhost:{APP_PORT}\n")
+        uvicorn.run(app, host="127.0.0.1", port=APP_PORT)

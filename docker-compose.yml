@@ -1,0 +1,48 @@
+# Production layout:   Internet -> caddy (HTTPS) -> app -> per-user containers on the internal network.
+#   docker compose --profile build build jupyter-image      # once: the per-user image
+#   docker compose up -d --build
+# Needs .env.multiuser (run: python setup_multiuser.py) and DOCKER_GID (stat -c %g /var/run/docker.sock).
+name: tutor
+
+services:
+  app:
+    build: { context: ., dockerfile: docker/Dockerfile.app }
+    env_file: .env.multiuser
+    environment:
+      TUTOR_ISOLATION: docker
+      TUTOR_DOCKER_NETWORK: tutor-users        # per-user containers join this internal (no-internet) network
+      TUTOR_FORWARDED_ALLOW_IPS: "*"           # only caddy can reach the app
+    volumes:
+      - tutor-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add: ["${DOCKER_GID:-999}"]
+    networks: [web, users]
+    restart: unless-stopped
+
+  jupyter-image:                                # only used to build the per-user image
+    build: { context: ., dockerfile: docker/Dockerfile.jupyter }
+    image: coding-tutor-jupyter
+    profiles: ["build"]
+
+  caddy:
+    image: caddy:2
+    env_file: .env.multiuser                    # provides TUTOR_DOMAIN
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [web]
+    depends_on: [app]
+    restart: unless-stopped
+
+networks:
+  web: {}
+  users:
+    name: tutor-users
+    internal: true
+
+volumes:
+  tutor-data: {}
+  caddy-data: {}
+  caddy-config: {}

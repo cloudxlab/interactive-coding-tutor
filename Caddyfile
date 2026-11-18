@@ -1,0 +1,5 @@
+# Caddy obtains and renews the HTTPS certificate automatically for TUTOR_DOMAIN (e.g. tutor.example.com).
+{$TUTOR_DOMAIN} {
+	encode gzip
+	reverse_proxy app:8765
+}

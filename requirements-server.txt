@@ -1,0 +1,10 @@
+# Dependencies of the multi-user server image (no JupyterLab: each user's Jupyter runs in its own container)
+fastapi
+uvicorn
+websockets
+httpx
+authlib
+itsdangerous
+anthropic
+openai
+nbformat

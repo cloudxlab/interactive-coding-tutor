@@ -50,12 +50,28 @@
   #onboard .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 28px; width: min(560px, 92vw); }
   #onboard h2 { margin-top: 0; }
   #onboard textarea { width: 100%; height: 140px; font: inherit; padding: 10px; border: 1px solid var(--line); border-radius: 6px; margin: 8px 0 14px; }
+  #login { position: fixed; inset: 0; background: var(--bg); display: none; align-items: center; justify-content: center; z-index: 10; }
+  #login .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 28px; width: min(420px, 92vw); text-align: center; }
+  #login h2 { margin-top: 0; }
+  #login .prov { display: block; width: 100%; margin: 10px 0; padding: 10px 12px; text-decoration: none; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 8px; font-weight: 600; }
+  #login .prov:hover { background: #f3f5f7; }
+  #who { font-size: 12px; color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: none; }
+  #logout { display: none; }
   .err-banner { color: var(--bad); margin-top: 8px; }
   .spin::after { content: ""; display: inline-block; width: 12px; height: 12px; margin-left: 8px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: s .7s linear infinite; vertical-align: -2px; }
   @keyframes s { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
+<div id="login">
+  <div class="card">
+    <h2>🐍 Python Coding Tutor</h2>
+    <p>Sign in to learn Python with a personal tutor. Your progress is saved to your account.</p>
+    <div id="providers"></div>
+    <div id="login-err" class="err-banner"></div>
+  </div>
+</div>
+
 <div id="onboard" style="display:none">
   <div class="card">
     <h2>🐍 Python Coding Tutor</h2>
@@ -71,8 +87,10 @@
     <header>
       <h1>Python Tutor</h1>
       <span class="badge" id="level">Level –</span>
+      <span id="who"></span>
       <button id="kbtn">My knowledge</button>
       <button id="reset" title="Start over">↺</button>
+      <button id="logout" title="Sign out">Sign out</button>
     </header>
     <div id="knowledge"></div>
     <div id="msgs"></div>
@@ -119,6 +137,7 @@ function md(src) {
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
+  if (r.status === 401) { showLogin(); throw new Error('Please sign in.'); }
   if (!r.ok) {
     let d = r.statusText;
     try { d = (await r.json()).detail || d; } catch {}
@@ -171,7 +190,8 @@ function render() {
   $('next').style.display = passed ? '' : 'none';
   if (s.current && s.current.notebook !== shownNotebook) {
     shownNotebook = s.current.notebook;
-    $('nb').src = s.current.notebook_url.replace('localhost', location.hostname);
+    const u = s.current.notebook_url;
+    $('nb').src = u.startsWith('/') ? u : u.replace('localhost', location.hostname);
     $('nbhint').style.display = 'none';
   }
 }
@@ -226,7 +246,29 @@ $('divider').onmousedown = e => {
   document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); e.preventDefault();
 };
 
-api('/api/state').then(s => { state = s; show(); });
+let me = null;
+const LOGIN_ERRORS = { failed: 'Sign-in failed. Please try again.', denied: 'This account is not allowed to use this tutor.' };
+
+function showLogin() {
+  $('app').classList.remove('on'); $('onboard').style.display = 'none'; $('login').style.display = 'flex';
+  $('providers').innerHTML = (me?.providers || []).map(p => `<a class="prov" href="/auth/login/${encodeURIComponent(p.id)}">Continue with ${esc(p.label)}</a>`).join('')
+    || '<p class="fail">No sign-in providers are configured.</p>';
+  const err = new URLSearchParams(location.search).get('login_error');
+  $('login-err').textContent = err ? (LOGIN_ERRORS[err] || LOGIN_ERRORS.failed) : '';
+}
+
+$('logout').onclick = async () => { try { await post('/auth/logout'); } catch {} location.href = '/'; };
+
+async function start() {
+  me = await api('/api/me');
+  if (me.mode === 'multiuser') {
+    if (!me.user) { showLogin(); return; }
+    $('who').textContent = me.user.name; $('who').style.display = 'inline'; $('logout').style.display = '';
+  }
+  $('login').style.display = 'none';
+  state = await api('/api/state'); show();
+}
+start().catch(e => console.error(e));
 </script>
 </body>
 </html>

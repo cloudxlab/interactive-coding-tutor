@@ -177,6 +177,15 @@ Something else? The setup and launch windows print the error. Copy it and ask fo
 
 ---
 
+# Running it for many people (multi-user)
+
+Want a shared version where people **sign in with Google, GitHub or Microsoft**, each with their own progress and
+their own isolated notebook environment? That is a separate, more advanced setup for whoever runs a server. Beginners
+using the tutor on their own computer don't need it. See **[docs/MULTIUSER.md](docs/MULTIUSER.md)** and run
+`python3 setup_multiuser.py`.
+
+---
+
 # For developers
 
 Everything above uses the helper scripts. If you prefer to do it by hand:
@@ -225,6 +234,6 @@ To build a *hosted* app that signs users in with OpenRouter, reuse `make_pkce()`
 
 **Environment variables:** `TUTOR_PORT` (8765), `TUTOR_JUPYTER_PORT` (8766), `TUTOR_MODEL` (optional model override).
 
-**Files:** `app.py` (backend + AI + JupyterLab launcher), `runner.py` (runs your code and the tests in a separate process), `static/index.html` (the web UI), `openrouter_oauth.py` (OpenRouter sign-in helper), `setup.sh`/`launch.sh` (Mac/Linux), `setup.ps1`/`launch.ps1` + `.bat` wrappers (Windows). Progress is saved in `state.json`, notebooks in `workspace/`, your settings and key in `.env` (not committed to git).
+**Files:** `app.py` (backend + AI + JupyterLab launcher), `runner.py` (runs your code and the tests in a separate process), `static/index.html` (the web UI), `openrouter_oauth.py` (OpenRouter sign-in helper), `setup.sh`/`launch.sh` (Mac/Linux), `store.py` `auth.py` `proxy.py` `sandbox.py` (multi-user mode), `setup.ps1`/`launch.ps1` + `.bat` wrappers (Windows). Progress is saved in `state.json`, notebooks in `workspace/`, your settings and key in `.env` (not committed to git).
 
 **Notes:** your code runs locally in a plain subprocess with no sandbox, which is fine for a single-user local tool. Tests run on the *saved* notebook file. The Windows scripts are newer than the Mac/Linux ones, so please report any problems.

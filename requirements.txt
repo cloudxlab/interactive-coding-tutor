@@ -4,3 +4,7 @@ anthropic
 jupyterlab
 nbformat
 ipykernel
+authlib
+itsdangerous
+httpx
+websockets
