@@ -1,0 +1,7 @@
+.venv/
+.env
+state.json
+workspace/
+jlab_settings/
+jupyter.log
+__pycache__/
