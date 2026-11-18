@@ -1,6 +1,7 @@
 """Interactive Python coding tutor: chat (left) + JupyterLab (right)."""
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -98,7 +99,7 @@ def pick_provider():
     raise HTTPException(500, "No LLM configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or install the `claude` CLI.")
 
 
-def _llm_anthropic(system, messages, max_tokens):
+def _llm_anthropic(system, messages, max_tokens, json_mode=False):
     global _client
     if _client is None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -109,20 +110,21 @@ def _llm_anthropic(system, messages, max_tokens):
     return "".join(b.text for b in resp.content if b.type == "text")
 
 
-def _llm_openai(system, messages, max_tokens):
+def _llm_openai(system, messages, max_tokens, json_mode=False):
     try:
         from openai import OpenAI
     except ImportError:
         raise HTTPException(500, "The `openai` package is not installed. Run: .venv/bin/pip install openai")
     if not os.environ.get("OPENAI_API_KEY"):
         raise HTTPException(500, "OPENAI_API_KEY is not set.")
+    kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
     resp = OpenAI().chat.completions.create(
-        model=os.environ.get("TUTOR_MODEL", "gpt-4.1"), max_tokens=max_tokens,
-        messages=[{"role": "system", "content": system}] + messages)
+        model=os.environ.get("TUTOR_MODEL", "gpt-4.1"), max_completion_tokens=max_tokens,
+        messages=[{"role": "system", "content": system}] + messages, **kwargs)
     return resp.choices[0].message.content
 
 
-def _llm_claude_cli(system, messages, max_tokens):
+def _llm_claude_cli(system, messages, max_tokens, json_mode=False):
     """Shells out to `claude -p` (uses the user's existing Claude Code login; no API key needed)."""
     if len(messages) == 1:
         prompt = messages[0]["content"]
@@ -146,22 +148,43 @@ def _llm_claude_cli(system, messages, max_tokens):
 PROVIDERS = {"anthropic": _llm_anthropic, "openai": _llm_openai, "claude-cli": _llm_claude_cli}
 
 
-def llm(system, messages, max_tokens=4000):
+def llm(system, messages, max_tokens=4000, json_mode=False):
     provider = pick_provider()
     if provider not in PROVIDERS:
         raise HTTPException(500, f"Unknown TUTOR_LLM '{provider}'. Use one of: {', '.join(PROVIDERS)}.")
-    return PROVIDERS[provider](system, messages, max_tokens)
+    return PROVIDERS[provider](system, messages, max_tokens, json_mode)
+
+
+_JSON_ESCAPE = re.compile(r'\\(["\\/bfnrt]|u[0-9a-fA-F]{4})|\\')
+
+
+def _fix_escapes(text):
+    """Models often put Python code (e.g. regexes like \\d) in JSON strings with un-escaped backslashes.
+    Keep valid JSON escapes, double any other backslash."""
+    return _JSON_ESCAPE.sub(lambda m: m.group(0) if m.group(1) else "\\\\", text)
+
+
+def parse_json(text):
+    a, b = text.find("{"), text.rfind("}")
+    if a < 0 or b < 0:
+        raise ValueError("no JSON object found")
+    raw = text[a : b + 1]
+    try:
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError:
+        return json.loads(_fix_escapes(raw), strict=False)
 
 
 def llm_json(system, user, max_tokens=4000):
-    text = llm(system + "\n\nRespond with a single JSON object and nothing else.", [{"role": "user", "content": user}], max_tokens)
-    a, b = text.find("{"), text.rfind("}")
-    if a < 0 or b < 0:
-        raise HTTPException(502, "The model did not return JSON.")
-    try:
-        return json.loads(text[a : b + 1])
-    except json.JSONDecodeError as e:
-        raise HTTPException(502, f"The model returned malformed JSON: {e}")
+    system += "\n\nRespond with a single JSON object and nothing else. Escape every backslash inside strings as \\\\ ."
+    last = None
+    for _ in range(2):
+        text = llm(system, [{"role": "user", "content": user}], max_tokens, json_mode=True)
+        try:
+            return parse_json(text)
+        except (ValueError, json.JSONDecodeError) as e:
+            last = e
+    raise HTTPException(502, f"The model returned malformed JSON: {last}")
 
 
 # ----------------------------------------------------------------------------
