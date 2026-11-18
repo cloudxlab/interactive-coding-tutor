@@ -301,7 +301,7 @@ def generate_problem(s, direction, topic_hint=None):
     system = (
         "You are an expert Python tutor generating ONE coding problem with test cases. " + DIFFICULTY + "\n"
         "Rules: the learner writes a single function in a Jupyter notebook. Problems must be fully specified with 1-2 examples "
-        "in the description (markdown). Provide a starter code stub (function signature + docstring + `pass`). "
+        "in the description (markdown). The description must NOT start with a heading or repeat the title (the title is shown separately); use plain paragraphs, and \"### Examples\"-style subheadings only if needed. Provide a starter code stub (function signature + docstring + `pass`). "
         "Provide 6-10 test cases including edge cases; each test is {\"call\": \"<python expression calling the function>\", "
         "\"expected\": \"<python expression for expected value>\"}. Tests must be deterministic and use ==-comparable values. "
         "IMPORTANT: the function must RETURN its result (never print or use input()), even for absolute beginners: "
@@ -327,6 +327,7 @@ def generate_problem(s, direction, topic_hint=None):
             assert not res["load_error"], res["load_error"]
             bad = [r for r in res["results"] if not r["passed"]]
             assert not bad, f"reference solution fails tests: {bad[:2]}"
+            prob["description"] = re.sub(r"\A\s*#{1,6}[ \t]+[^\n]*\n+", "", prob["description"])
             return prob
         except AssertionError as e:
             last_err = str(e)

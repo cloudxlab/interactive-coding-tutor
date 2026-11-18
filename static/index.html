@@ -34,6 +34,7 @@
   .m.user { background: var(--accent); color: #fff; align-self: flex-end; }
   .m.problem { background: #fff8e6; border: 1px solid #f0d78c; align-self: stretch; max-width: 100%; }
   .m p { margin: 4px 0; }
+  .m h4 { margin: 10px 0 4px; font-size: 14px; }
   .m pre { background: #1f2328; color: #f0f3f6; padding: 8px 10px; border-radius: 6px; overflow-x: auto; margin: 6px 0; }
   .m code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
   .m :not(pre) > code { background: rgba(0,0,0,.08); padding: 1px 4px; border-radius: 4px; }
@@ -98,8 +99,18 @@ function md(src) {
   const parts = src.split(/```(?:\w+)?\n([\s\S]*?)```/g);
   return parts.map((p, i) => {
     if (i % 2) return `<pre><code>${esc(p)}</code></pre>`;
-    return esc(p).split(/\n{2,}/).map(par => {
-      par = par.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[^*\w])[*_]([^*_\n]+)[*_]/g, '$1<i>$2</i>');
+    // put headings on their own paragraph so "### Examples" followed by a list still renders as a heading
+    return esc(p).replace(/^(#{1,6} .*)$/gm, '\n\n$1\n\n').split(/\n{2,}/).filter(par => par.trim()).map(par => {
+      const isHeading = /^#{1,6}\s+/.test(par);
+      if (isHeading) par = par.replace(/^#{1,6}\s+/, '');
+      // set code spans aside so underscores inside them (problem_003.ipynb) aren't read as italics
+      const codes = [];
+      par = par.replace(/`([^`]+)`/g, (m, c) => '\u0000' + (codes.push(c) - 1) + '\u0000');
+      par = par.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+               .replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<i>$2</i>')
+               .replace(/(^|[^\w])_([^_\n]+)_(?!\w)/g, '$1<i>$2</i>')
+               .replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[i]}</code>`);
+      if (isHeading) return `<h4>${par}</h4>`;
       if (/^\s*[-*] /m.test(par)) return '<ul>' + par.split('\n').map(l => l.replace(/^\s*[-*] (.*)/, '<li>$1</li>')).join('') + '</ul>';
       return `<p>${par.replace(/\n/g, '<br>')}</p>`;
     }).join('');
