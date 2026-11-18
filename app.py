@@ -53,13 +53,13 @@ def default_state():
 def load_state():
     with _lock:
         if STATE_FILE.exists():
-            return {**default_state(), **json.loads(STATE_FILE.read_text())}
+            return {**default_state(), **json.loads(STATE_FILE.read_text(encoding="utf-8"))}
         return default_state()
 
 
 def save_state(s):
     with _lock:
-        STATE_FILE.write_text(json.dumps(s, indent=2))
+        STATE_FILE.write_text(json.dumps(s, indent=2), encoding="utf-8")
 
 
 def public_state(s):
@@ -130,12 +130,12 @@ def _llm_claude_cli(system, messages, max_tokens):
         prompt = "Conversation so far:\n\n" + "\n\n".join(
             f'{"Learner" if m["role"] == "user" else "Tutor"}: {m["content"]}' for m in messages
         ) + "\n\nWrite the Tutor's next reply only."
-    cmd = ["claude", "-p", "--system-prompt", system, "--tools", "", "--no-session-persistence", "--disable-slash-commands"]
+    cmd = [shutil.which("claude") or "claude", "-p", "--system-prompt", system, "--tools", "", "--no-session-persistence", "--disable-slash-commands"]
     if os.environ.get("TUTOR_MODEL"):
         cmd += ["--model", os.environ["TUTOR_MODEL"]]
     with tempfile.TemporaryDirectory() as d:  # neutral cwd so no project CLAUDE.md/settings leak in
         try:
-            p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=180, cwd=d)
+            p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180, cwd=d)
         except subprocess.TimeoutExpired:
             raise HTTPException(504, "The `claude` command timed out.")
     if p.returncode != 0 or not p.stdout.strip():
@@ -178,7 +178,7 @@ def start_jupyter():
     settings.mkdir(exist_ok=True)
     # Autosave every 5s so the notebook on disk is (almost) always current when we run the tests.
     (settings / "overrides.json").write_text(
-        json.dumps({"@jupyterlab/docmanager-extension:plugin": {"autosaveInterval": 5}})
+        json.dumps({"@jupyterlab/docmanager-extension:plugin": {"autosaveInterval": 5}}), encoding="utf-8"
     )
     tornado = {"headers": {"Content-Security-Policy": "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"}}
     cmd = [
@@ -241,14 +241,14 @@ def notebook_code(name):
 def run_tests(code, tests):
     with tempfile.TemporaryDirectory() as d:
         payload = Path(d) / "payload.json"
-        payload.write_text(json.dumps({"code": code, "tests": tests}))
+        payload.write_text(json.dumps({"code": code, "tests": tests}), encoding="utf-8")
         try:
             p = subprocess.run(
                 [sys.executable, "-I", str(ROOT / "runner.py"), str(payload)],
-                capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL, cwd=d,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=40, stdin=subprocess.DEVNULL, cwd=d,
             )
         except subprocess.TimeoutExpired:
-            return {"load_error": "Your code took too long to run (over 20s). Check for infinite loops.", "results": []}
+            return {"load_error": "Your code took too long to run (over 40s). Check for infinite loops.", "results": []}
     for line in reversed(p.stdout.splitlines()):
         if line.startswith("RESULT:"):
             return json.loads(line[len("RESULT:"):])
