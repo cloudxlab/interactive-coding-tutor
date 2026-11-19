@@ -5,6 +5,7 @@ jupyterlab
 nbformat
 ipykernel
 authlib
+cryptography
 itsdangerous
 httpx
 websockets

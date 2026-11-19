@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements-server.txt .
 RUN pip install -r requirements-server.txt \
  && useradd -m -u 10002 tutor && mkdir /data && chown 10002:10002 /data
-COPY app.py auth.py proxy.py sandbox.py store.py runner.py ./
+COPY app.py auth.py byo.py openrouter_oauth.py proxy.py sandbox.py store.py runner.py ./
 COPY static ./static
 ENV TUTOR_MODE=multiuser TUTOR_HOST=0.0.0.0 TUTOR_DATA_DIR=/data TUTOR_PORT=8765
 USER 10002

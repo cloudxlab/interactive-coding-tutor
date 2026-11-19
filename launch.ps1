@@ -21,10 +21,11 @@ $llm = $env:TUTOR_LLM
 switch ($llm) {
     "anthropic"  { if (-not $env:ANTHROPIC_API_KEY) { Fail "ANTHROPIC_API_KEY missing. Run setup.bat" } }
     "openai"     { if (-not $env:OPENAI_API_KEY) { Fail "OPENAI_API_KEY missing. Run setup.bat" } }
+    "llmgateway" { if (-not $env:LLMGATEWAY_API_KEY) { Fail "LLMGATEWAY_API_KEY missing. Run setup.bat" } }
     "openrouter" { if (-not $env:OPENROUTER_API_KEY) { Fail "OPENROUTER_API_KEY missing. Run setup.bat" } }
     "claude-cli" { if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Fail "'claude' command not found. Run setup.bat" } }
     default {
-        if (-not ($env:ANTHROPIC_API_KEY -or $env:OPENAI_API_KEY -or $env:OPENROUTER_API_KEY -or (Get-Command claude -ErrorAction SilentlyContinue))) {
+        if (-not ($env:LLMGATEWAY_API_KEY -or $env:ANTHROPIC_API_KEY -or $env:OPENAI_API_KEY -or $env:OPENROUTER_API_KEY -or (Get-Command claude -ErrorAction SilentlyContinue))) {
             Fail "No LLM configured. Run setup.bat"
         }
     }

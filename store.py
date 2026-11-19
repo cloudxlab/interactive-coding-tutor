@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS users (
     last_login INTEGER NOT NULL,
     UNIQUE (provider, subject)
 );
+CREATE TABLE IF NOT EXISTS user_llm (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    key_enc TEXT NOT NULL,          -- the user's OpenRouter key, encrypted at rest (see byo.py)
+    model TEXT,
+    connected_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS state (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     json TEXT NOT NULL,
@@ -93,3 +99,24 @@ class Store:
     def delete_state(self, uid):
         with self._write_lock, closing(self._conn()) as c, c:
             c.execute("DELETE FROM state WHERE user_id=?", (int(uid),))
+
+    # --- bring-your-own LLM (OpenRouter) -------------------------------------------------------
+    def get_llm(self, uid):
+        with closing(self._conn()) as c:
+            row = c.execute("SELECT key_enc, model, connected_at FROM user_llm WHERE user_id=?", (int(uid),)).fetchone()
+        return dict(row) if row else None
+
+    def set_llm_key(self, uid, key_enc):
+        """Connect (or reconnect): stores the new key and keeps the user's model choice, if any."""
+        with self._write_lock, closing(self._conn()) as c, c:
+            c.execute("INSERT INTO user_llm (user_id, key_enc, model, connected_at) VALUES (?,?,NULL,?) "
+                      "ON CONFLICT(user_id) DO UPDATE SET key_enc=excluded.key_enc, connected_at=excluded.connected_at",
+                      (int(uid), key_enc, int(time.time())))
+
+    def set_llm_model(self, uid, model):
+        with self._write_lock, closing(self._conn()) as c, c:
+            c.execute("UPDATE user_llm SET model=? WHERE user_id=?", (model, int(uid)))
+
+    def delete_llm(self, uid):
+        with self._write_lock, closing(self._conn()) as c, c:
+            c.execute("DELETE FROM user_llm WHERE user_id=?", (int(uid),))

@@ -70,34 +70,57 @@ function Ask-Key($label, $existing, $prefix) {
     }
 }
 
-function Get-OpenRouterKey($existing) {
-    if ($existing) {
-        $keep = Read-Host "OpenRouter key already saved. Keep it? [Y/n]"
-        if ($keep -notmatch "^[nN]") { return $existing }
+# Returns $false only if LLM Gateway rejects the key. Sets $script:modelsList.
+function Test-LlmGatewayKey($key) {
+    $script:modelsList = @()
+    $env:LLMGATEWAY_API_KEY = $key
+    $out = $null
+    try { $out = & $venvPy llmgateway_models.py 2>$null } catch { }
+    $rc = $LASTEXITCODE
+    Remove-Item Env:LLMGATEWAY_API_KEY -ErrorAction SilentlyContinue
+    if ($rc -eq 0 -and $out) {
+        $script:modelsList = @($out)
+        Write-Host "Key verified. Some models you can use:"
+        $script:modelsList | Select-Object -First 12 | ForEach-Object { Write-Host "    $_" }
+        return $true
     }
-    Write-Host "How do you want to give the tutor your OpenRouter key?"
-    Write-Host "  1) Sign in with my browser (OAuth, recommended: no copy/paste)"
-    Write-Host "  2) I'll paste a key"
-    $how = Read-Host "Choose [1-2]"
-    if ($how -ne "2") {
-        $k = $null
-        try { $k = (& $venvPy openrouter_oauth.py --print-key | Where-Object { $_ } | Select-Object -Last 1) } catch { }
-        if ($k) { return "$k".Trim() }
-        Write-Host "Browser sign-in did not complete. Let's paste a key instead."
-    }
-    return (Ask-Key "OpenRouter" "" "sk-or-")
+    if ($rc -eq 2) { Write-Host "LLM Gateway rejected that key. Please check it and try again."; return $false }
+    Write-Host "Couldn't reach LLM Gateway to verify the key (network or proxy?). Continuing without verifying."
+    return $true
 }
 
-$llm = ""; $anthropicKey = ""; $openaiKey = ""; $openrouterKey = ""
+$llm = ""; $llmgatewayKey = ""; $anthropicKey = ""; $openaiKey = ""; $modelsList = @()
 while (-not $llm) {
     Write-Host "Which LLM should the tutor use?"
-    Write-Host "  1) Anthropic  (API key)"
-    Write-Host "  2) OpenAI     (API key)"
-    Write-Host "  3) OpenRouter (API key or browser sign-in; many models)"
+    Write-Host "  1) LLM Gateway  (API key; many models through one API)  <- default"
+    Write-Host "  2) Anthropic    (API key)"
+    Write-Host "  3) OpenAI       (API key)"
     Write-Host "  4) claude command line (uses your Claude Code login, no key needed)"
-    $choice = Read-Host "Choose [1-4]"
+    $choice = Read-Host "Choose [1-4, press Enter for 1]"
+    if (-not $choice) { $choice = "1" }
     switch ($choice) {
         "1" {
+            $llm = "llmgateway"
+            $oldKey = $old["LLMGATEWAY_API_KEY"]
+            if (-not $oldKey) {
+                Write-Host ""
+                Write-Host "--- How to get an LLM Gateway API key ---"
+                Write-Host "LLM Gateway is one account that gives you access to many AI models through a single API."
+                Write-Host "  1. Go to https://llmgateway.io and sign up (email, GitHub or Google), or log in."
+                Write-Host "  2. Add credit or a payment method in the dashboard if your plan needs it."
+                Write-Host "  3. Create a project, open its 'API Keys' page and click 'Create API Key'."
+                Write-Host "  4. Copy the key right away (it usually starts with 'llmgtwy_'); it may only be shown once."
+                $o = Read-Host "Open llmgateway.io in your browser now? [Y/n]"
+                if ($o -notmatch "^[nN]") { Open-Url "https://llmgateway.io" }
+                Write-Host ""
+            }
+            while ($true) {
+                $llmgatewayKey = Ask-Key "LLM Gateway" $oldKey "llmgtwy_"
+                if (Test-LlmGatewayKey $llmgatewayKey) { break }
+                $oldKey = ""   # don't offer to keep a rejected key
+            }
+        }
+        "2" {
             $llm = "anthropic"
             if (-not $old["ANTHROPIC_API_KEY"]) {
                 Write-Host ""
@@ -112,7 +135,7 @@ while (-not $llm) {
             }
             $anthropicKey = Ask-Key "Anthropic" $old["ANTHROPIC_API_KEY"] "sk-ant-"
         }
-        "2" {
+        "3" {
             $llm = "openai"
             if (-not $old["OPENAI_API_KEY"]) {
                 Write-Host ""
@@ -129,20 +152,6 @@ while (-not $llm) {
             $openaiKey = Ask-Key "OpenAI" $old["OPENAI_API_KEY"] "sk-"
             Write-Host "Installing the openai package..."
             & $venvPy -m pip install -q openai
-        }
-        "3" {
-            $llm = "openrouter"
-            if (-not $old["OPENROUTER_API_KEY"]) {
-                Write-Host ""
-                Write-Host "--- How to get an OpenRouter API key ---"
-                Write-Host "OpenRouter is one account that gives you access to many AI models (Claude, GPT, Gemini, ...)."
-                Write-Host "  1. Go to https://openrouter.ai and sign in (or create an account)."
-                Write-Host "  2. Add credits at https://openrouter.ai/settings/credits (pay-as-you-go; some models are free)."
-                Write-Host "  3. EITHER let this script sign you in through your browser (easiest), OR create a key yourself at"
-                Write-Host "     https://openrouter.ai/settings/keys ('Create Key') and copy it (it starts with 'sk-or-')."
-                Write-Host ""
-            }
-            $openrouterKey = Get-OpenRouterKey $old["OPENROUTER_API_KEY"]
         }
         "4" {
             if (Get-Command claude -ErrorAction SilentlyContinue) { $llm = "claude-cli" }
@@ -162,17 +171,21 @@ while (-not $llm) {
     }
 }
 
-if ($llm -eq "openrouter") {
-    Write-Host "OpenRouter model ids look like provider/model (browse https://openrouter.ai/models)."
-    $model = Read-Host "Model (press Enter for anthropic/claude-sonnet-4.5)"
+if ($llm -eq "llmgateway") {
+    while ($true) {
+        $model = Read-Host "Model (press Enter for gpt-4o)"
+        $pick = if ($model) { $model } else { "gpt-4o" }
+        if ($modelsList.Count -eq 0 -or $modelsList -contains $pick) { break }
+        Write-Host "'$pick' is not in your LLM Gateway model list above. Pick one of those."
+    }
 } else {
     $model = Read-Host "Model override (press Enter for the default)"
 }
 
 $lines = @("TUTOR_LLM=$llm")
+if ($llmgatewayKey) { $lines += "LLMGATEWAY_API_KEY='$llmgatewayKey'" }
 if ($anthropicKey) { $lines += "ANTHROPIC_API_KEY='$anthropicKey'" }
 if ($openaiKey)    { $lines += "OPENAI_API_KEY='$openaiKey'" }
-if ($openrouterKey) { $lines += "OPENROUTER_API_KEY='$openrouterKey'" }
 if ($model)        { $lines += "TUTOR_MODEL='$model'" }
 [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot ".env"), (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))
 

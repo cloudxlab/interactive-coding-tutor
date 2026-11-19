@@ -4,6 +4,7 @@ uvicorn
 websockets
 httpx
 authlib
+cryptography
 itsdangerous
 anthropic
 openai

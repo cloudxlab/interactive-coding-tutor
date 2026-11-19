@@ -29,10 +29,10 @@ if [ ! -t 0 ]; then
 fi
 
 # Remember previous answers so re-running setup can keep them.
-OLD_LLM=""; OLD_ANTHROPIC=""; OLD_OPENAI=""; OLD_OPENROUTER=""
+OLD_LLM=""; OLD_LLMGATEWAY=""; OLD_ANTHROPIC=""; OLD_OPENAI=""
 if [ -f .env ]; then
   set -a; . ./.env; set +a
-  OLD_LLM="${TUTOR_LLM:-}"; OLD_ANTHROPIC="${ANTHROPIC_API_KEY:-}"; OLD_OPENAI="${OPENAI_API_KEY:-}"; OLD_OPENROUTER="${OPENROUTER_API_KEY:-}"
+  OLD_LLM="${TUTOR_LLM:-}"; OLD_ANTHROPIC="${ANTHROPIC_API_KEY:-}"; OLD_OPENAI="${OPENAI_API_KEY:-}"; OLD_LLMGATEWAY="${LLMGATEWAY_API_KEY:-}"
   [ -n "$OLD_LLM" ] && echo "Current LLM setting: $OLD_LLM"
 fi
 
@@ -84,34 +84,29 @@ guide_claude_cli() {
 G
 }
 
-guide_openrouter() {
+guide_llmgateway() {
   cat >&2 <<'G'
 
---- How to get an OpenRouter API key ---
-OpenRouter is one account that gives you access to many AI models (Claude, GPT, Gemini, ...).
-  1. Go to https://openrouter.ai and sign in (or create an account).
-  2. Add credits at https://openrouter.ai/settings/credits (pay-as-you-go; some models are free).
-  3. EITHER let this script sign you in through your browser (easiest), OR create a key yourself at
-     https://openrouter.ai/settings/keys ("Create Key") and copy it (it starts with "sk-or-").
+--- How to get an LLM Gateway API key ---
+LLM Gateway is one account that gives you access to many AI models through a single API.
+  1. Go to https://llmgateway.io and sign up (email, GitHub or Google), or log in.
+  2. Add credit or a payment method in the dashboard if your plan needs it.
+  3. Create a project, open its "API Keys" page and click "Create API Key".
+  4. Copy the key right away (it usually starts with "llmgtwy_"); it may only be shown once.
 G
+  read -r -p "Open llmgateway.io in your browser now? [Y/n] " o >&2
+  case "$o" in [nN]*) ;; *) open_url "https://llmgateway.io";; esac
   echo >&2
 }
 
-get_openrouter_key() {  # $1 = existing key; prints the key to stdout
-  if [ -n "$1" ]; then
-    read -r -p "OpenRouter key already saved. Keep it? [Y/n] " keep >&2
-    case "$keep" in [nN]*) ;; *) echo "$1"; return;; esac
-  fi
-  echo "How do you want to give the tutor your OpenRouter key?" >&2
-  echo "  1) Sign in with my browser (OAuth, recommended: no copy/paste)" >&2
-  echo "  2) I'll paste a key" >&2
-  read -r -p "Choose [1-2]: " how >&2
-  if [ "$how" != "2" ]; then
-    local k
-    if k="$(.venv/bin/python openrouter_oauth.py --print-key)" && [ -n "$k" ]; then echo "$k"; return; fi
-    echo "Browser sign-in did not complete. Let's paste a key instead." >&2
-  fi
-  ask_key OpenRouter "" sk-or-
+verify_llmgateway() {  # $1 = key. Sets MODELS_LIST. Returns 1 only if LLM Gateway rejects the key.
+  local rc=0
+  MODELS_LIST="$(LLMGATEWAY_API_KEY="$1" .venv/bin/python llmgateway_models.py 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) echo "Key verified. Some models you can use:"; echo "$MODELS_LIST" | head -12 | sed 's/^/    /';;
+    2) echo "LLM Gateway rejected that key. Please check it and try again."; return 1;;
+    *) echo "Couldn't reach LLM Gateway to verify the key (network or proxy?). Continuing without verifying."; MODELS_LIST="";;
+  esac
 }
 
 ask_key() {  # prompts for a key; $3 = expected prefix  # $1=label  $2=existing value -> echoes key
@@ -132,25 +127,29 @@ ask_key() {  # prompts for a key; $3 = expected prefix  # $1=label  $2=existing 
   echo "$key"
 }
 
-LLM=""; ANTHROPIC_KEY=""; OPENAI_KEY=""; OPENROUTER_KEY=""
+LLM=""; LLMGATEWAY_KEY=""; ANTHROPIC_KEY=""; OPENAI_KEY=""; MODELS_LIST=""
 while [ -z "$LLM" ]; do
   echo "Which LLM should the tutor use?"
-  echo "  1) Anthropic  (API key)"
-  echo "  2) OpenAI     (API key)"
-  echo "  3) OpenRouter (API key or browser sign-in; many models)"
+  echo "  1) LLM Gateway  (API key; many models through one API)  <- default"
+  echo "  2) Anthropic    (API key)"
+  echo "  3) OpenAI       (API key)"
   echo "  4) claude command line (uses your Claude Code login, no key needed)"
-  read -r -p "Choose [1-4]: " choice
-  case "$choice" in
-    1) LLM=anthropic
+  read -r -p "Choose [1-4, press Enter for 1]: " choice
+  case "${choice:-1}" in
+    1) LLM=llmgateway
+       if [ -z "$OLD_LLMGATEWAY" ]; then guide_llmgateway; fi
+       while true; do
+         LLMGATEWAY_KEY="$(ask_key "LLM Gateway" "$OLD_LLMGATEWAY" llmgtwy_)"
+         if verify_llmgateway "$LLMGATEWAY_KEY"; then break; fi
+         OLD_LLMGATEWAY=""   # don't offer to keep a rejected key
+       done;;
+    2) LLM=anthropic
        if [ -z "$OLD_ANTHROPIC" ]; then guide_anthropic; fi
        ANTHROPIC_KEY="$(ask_key Anthropic "$OLD_ANTHROPIC" sk-ant-)";;
-    2) LLM=openai
+    3) LLM=openai
        if [ -z "$OLD_OPENAI" ]; then guide_openai; fi
        OPENAI_KEY="$(ask_key OpenAI "$OLD_OPENAI" sk-)"
        echo "Installing the openai package..."; .venv/bin/pip install -q openai;;
-    3) LLM=openrouter
-       if [ -z "$OLD_OPENROUTER" ]; then guide_openrouter; fi
-       OPENROUTER_KEY="$(get_openrouter_key "$OLD_OPENROUTER")";;
     4) if command -v claude >/dev/null; then LLM=claude-cli
        else echo "The 'claude' command was not found on your PATH."; guide_claude_cli
        read -r -p "Press Enter to go back to the menu..." _; echo; fi;;
@@ -158,9 +157,13 @@ while [ -z "$LLM" ]; do
   esac
 done
 
-if [ "$LLM" = "openrouter" ]; then
-  echo "OpenRouter model ids look like provider/model (browse https://openrouter.ai/models)."
-  read -r -p "Model (press Enter for anthropic/claude-sonnet-4.5): " MODEL
+if [ "$LLM" = "llmgateway" ]; then
+  while true; do
+    read -r -p "Model (press Enter for gpt-4o): " MODEL
+    pick="${MODEL:-gpt-4o}"
+    if [ -z "$MODELS_LIST" ] || echo "$MODELS_LIST" | grep -qxF "$pick"; then break; fi
+    echo "'$pick' is not in your LLM Gateway model list above. Pick one of those (or press Ctrl+C to stop)."
+  done
 else
   read -r -p "Model override (press Enter for the default): " MODEL
 fi
@@ -168,9 +171,9 @@ fi
 umask 077
 {
   echo "TUTOR_LLM=$LLM"
+  [ -n "$LLMGATEWAY_KEY" ] && echo "LLMGATEWAY_API_KEY='$LLMGATEWAY_KEY'"
   [ -n "$ANTHROPIC_KEY" ] && echo "ANTHROPIC_API_KEY='$ANTHROPIC_KEY'"
   [ -n "$OPENAI_KEY" ] && echo "OPENAI_API_KEY='$OPENAI_KEY'"
-  [ -n "$OPENROUTER_KEY" ] && echo "OPENROUTER_API_KEY='$OPENROUTER_KEY'"
   [ -n "$MODEL" ] && echo "TUTOR_MODEL='$MODEL'"
   true
 } > .env

@@ -165,22 +165,28 @@ def main():
 
     # 4. LLM -----------------------------------------------------------------------------------------
     section("4. The AI behind the tutor")
-    print("One shared key is used for everyone, so each user is rate-limited (below).\n"
+    print("One shared AI key is used for everyone, so each user is rate-limited (below).\n"
+          "  1) LLM Gateway  (many models through one API)  <- default\n"
+          "  2) Anthropic    3) OpenAI\n"
           "(The 'claude' command can't be used here: it belongs to one person's login.)")
-    print("  1) Anthropic   2) OpenAI   3) OpenRouter")
-    default_choice = {"anthropic": "1", "openai": "2", "openrouter": "3"}.get(existing.get("TUTOR_LLM", ""), "1")
+    default_choice = {"anthropic": "2", "openai": "3"}.get(existing.get("TUTOR_LLM", ""), "1")
     choice = ask("Choose 1-3", default_choice, check=lambda v: None if v in ("1", "2", "3") else "Enter 1, 2 or 3.")
-    provider, keyvar, prefix, url = {
-        "1": ("anthropic", "ANTHROPIC_API_KEY", "sk-ant-", "https://console.anthropic.com/settings/keys"),
-        "2": ("openai", "OPENAI_API_KEY", "sk-", "https://platform.openai.com/api-keys"),
-        "3": ("openrouter", "OPENROUTER_API_KEY", "sk-or-", "https://openrouter.ai/settings/keys"),
+    provider, keyvar, prefix, url, how = {
+        "1": ("llmgateway", "LLMGATEWAY_API_KEY", "llmgtwy_", "https://llmgateway.io",
+              "Sign up (email, GitHub or Google), add credit if your plan needs it, then create a project and an API key."),
+        "2": ("anthropic", "ANTHROPIC_API_KEY", "sk-ant-", "https://console.anthropic.com/settings/keys", "Create a key in the console."),
+        "3": ("openai", "OPENAI_API_KEY", "sk-", "https://platform.openai.com/api-keys", "Create a secret key."),
     }[choice]
-    print(f"  Create a key at {url}")
+    print(f"  {how}\n  {url}")
+    if choice == "1":
+        open_url(url)
     vals["TUTOR_LLM"] = provider
-    vals[keyvar] = ask(f"  {provider.title()} API key (hidden)", existing.get(keyvar), secret=True)
+    vals[keyvar] = ask(f"  {provider.title() if choice != '1' else 'LLM Gateway'} API key (hidden)", existing.get(keyvar), secret=True)
     if not vals[keyvar].startswith(prefix):
         print(f"  Note: this doesn't start with '{prefix}'; double-check it.")
-    model = input(f"  Model override, optional [{existing.get('TUTOR_MODEL', '')}]: ").strip() or existing.get("TUTOR_MODEL", "")
+    if choice == "1":
+        print("  Tip: run  LLMGATEWAY_API_KEY=<key> python3 llmgateway_models.py  to verify the key and list model ids.")
+    model = input(f"  Model override, optional [{existing.get('TUTOR_MODEL', '')}] (default for LLM Gateway: gpt-4o): ").strip() or existing.get("TUTOR_MODEL", "")
     if model:
         vals["TUTOR_MODEL"] = model
 

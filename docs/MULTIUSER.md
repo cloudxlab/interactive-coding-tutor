@@ -89,7 +89,8 @@ groups only and prints a warning at startup.
 | `GOOGLE_CLIENT_ID/SECRET`, `GITHUB_CLIENT_ID/SECRET`, `MICROSOFT_CLIENT_ID/SECRET` | enable that provider | |
 | `MICROSOFT_TENANT` | tenant id, or `common`/`organizations`/`consumers` | `common` |
 | `TUTOR_ALLOWED_DOMAINS`, `TUTOR_ALLOWED_EMAILS` | comma lists; only verified emails count | open to all |
-| `TUTOR_LLM` + key | `anthropic` / `openai` / `openrouter` (not `claude-cli`) | |
+| `TUTOR_LLM` + key | `llmgateway` (default, needs `LLMGATEWAY_API_KEY`) / `anthropic` / `openai`; not `claude-cli` | `llmgateway` |
+| `TUTOR_MODEL` | model id (LLM Gateway default: `gpt-4o`; list yours with `python llmgateway_models.py`) | |
 | `TUTOR_LLM_CALLS_PER_HOUR` | AI calls per user per hour | 120 |
 | `TUTOR_ISOLATION` | `docker` or `none` (unsafe) | `docker` |
 | `TUTOR_DOCKER_IMAGE` | per-user image name | `coding-tutor-jupyter` |

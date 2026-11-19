@@ -49,6 +49,8 @@ _user_locks = {}
 _user_locks_guard = threading.Lock()
 _uid_var = contextvars.ContextVar("uid", default=None)  # who the current request belongs to (for rate limiting)
 _llm_calls = {}
+_byo = None  # multi-user: bring-your-own-LLM module (byo.py); hidden unless TUTOR_ENABLE_OPENROUTER=1
+BYO_ENABLED = os.environ.get("TUTOR_ENABLE_OPENROUTER", "").lower() in ("1", "true", "yes")
 _client = None
 _jupyter_proc = None
 
@@ -137,24 +139,29 @@ def rate_limit_llm():
     calls.append(now)
 
 
+SHARED_KEY_VARS = ("LLMGATEWAY_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
+
+
 def pick_provider():
-    """TUTOR_LLM = anthropic | openai | claude-cli, else auto-detect from keys / the `claude` command."""
+    """TUTOR_LLM = llmgateway | anthropic | openai | openrouter | claude-cli, else auto-detect (LLM Gateway first)."""
     choice = os.environ.get("TUTOR_LLM", "").lower()
-    if MULTIUSER and (choice == "claude-cli" or not choice and not (
-            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY"))):
-        raise HTTPException(500, "Multi-user mode needs an API-key provider (anthropic, openai or openrouter); "
-                                 "the `claude` command uses one person's login and can't be shared.")
+    if MULTIUSER and (choice == "claude-cli" or not choice and not any(os.environ.get(v) for v in SHARED_KEY_VARS)):
+        raise HTTPException(500, "No shared AI is configured for multi-user mode (the `claude` command can't be shared). "
+                                 "Set LLMGATEWAY_API_KEY (or another provider's API key) and restart.")
     if choice:
         return choice
+    if os.environ.get("LLMGATEWAY_API_KEY"):
+        return "llmgateway"
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
-    if os.environ.get("OPENROUTER_API_KEY"):
+    if os.environ.get("OPENROUTER_API_KEY"):  # not offered in setup for now, but still works if configured
         return "openrouter"
     if shutil.which("claude"):
         return "claude-cli"
-    raise HTTPException(500, "No LLM configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY, or install the `claude` CLI.")
+    raise HTTPException(500, "No LLM configured. Run setup, or set LLMGATEWAY_API_KEY (or ANTHROPIC_API_KEY / OPENAI_API_KEY), "
+                             "or install the `claude` CLI.")
 
 
 def _llm_anthropic(system, messages, max_tokens, json_mode=False):
@@ -182,40 +189,60 @@ def _llm_openai(system, messages, max_tokens, json_mode=False):
     return resp.choices[0].message.content
 
 
+DEFAULT_LLMGATEWAY_MODEL = "gpt-4o"  # a model id used in LLM Gateway's own examples; run `python llmgateway_models.py` to list yours
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5"
 
 
-def _llm_openrouter(system, messages, max_tokens, json_mode=False):
-    """OpenRouter's OpenAI-compatible API (https://openrouter.ai/docs). Plain HTTP, no extra package.
-    json_mode is ignored: not every OpenRouter model supports response_format, and parse_json is lenient."""
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        raise HTTPException(500, "OPENROUTER_API_KEY is not set. Run setup or openrouter_oauth.py.")
-    base = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+def _openai_compatible_chat(label, base, key, model, system, messages, max_tokens, extra_headers=None, rejected_hint=""):
+    """POST {base}/chat/completions on any OpenAI-compatible gateway. Plain HTTP, no extra package."""
     body = json.dumps({
-        "model": os.environ.get("TUTOR_MODEL") or DEFAULT_OPENROUTER_MODEL,
+        "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "system", "content": system}] + messages,
     }).encode()
-    req = urllib.request.Request(base + "/chat/completions", data=body, method="POST", headers={
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": f"http://localhost:{APP_PORT}",  # optional attribution headers OpenRouter recommends
-        "X-Title": "Python Coding Tutor",
-    })
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST", headers={
+        "Authorization": f"Bearer {key}", "Content-Type": "application/json", **(extra_headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
             data = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:400]
-        hint = " Your key may be invalid or out of credits." if e.code in (401, 402) else ""
-        raise HTTPException(502, f"OpenRouter error {e.code}: {detail}{hint}")
+        hint = rejected_hint if e.code in (401, 402, 403) else ""
+        raise HTTPException(502, f"{label} error {e.code}: {detail}{hint}")
     except Exception as e:
-        raise HTTPException(502, f"Could not reach OpenRouter: {e}")
+        raise HTTPException(502, f"Could not reach {label}: {e}")
     try:
         return data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError):
-        raise HTTPException(502, f"Unexpected OpenRouter response: {str(data)[:300]}")
+        raise HTTPException(502, f"Unexpected {label} response: {str(data)[:300]}")
+
+
+def _llm_llmgateway(system, messages, max_tokens, json_mode=False):
+    """LLM Gateway (https://llmgateway.io): one OpenAI-compatible API for many models.
+    json_mode is ignored (not every model supports response_format; parse_json is lenient)."""
+    key = os.environ.get("LLMGATEWAY_API_KEY")
+    if not key:
+        raise HTTPException(500, "LLMGATEWAY_API_KEY is not set. Run setup.")
+    return _openai_compatible_chat(
+        "LLM Gateway", os.environ.get("LLMGATEWAY_BASE_URL", "https://api.llmgateway.io/v1"), key,
+        os.environ.get("TUTOR_MODEL") or DEFAULT_LLMGATEWAY_MODEL, system, messages, max_tokens,
+        rejected_hint=" Your LLM Gateway key may be invalid, or the account is out of credits / not allowed to use this model."
+                      " Check llmgateway.io, or run setup again.")
+
+
+def _llm_openrouter(system, messages, max_tokens, json_mode=False, key=None, model=None):
+    """OpenRouter (not offered in setup for now; kept working for existing configs and the hidden bring-your-own feature).
+    key/model: a signed-in user's own OpenRouter account; otherwise the operator's settings."""
+    own_account = key is not None
+    key = key or os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        raise HTTPException(500, "OPENROUTER_API_KEY is not set.")
+    return _openai_compatible_chat(
+        "OpenRouter", os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), key,
+        model or os.environ.get("TUTOR_MODEL") or DEFAULT_OPENROUTER_MODEL, system, messages, max_tokens,
+        extra_headers={"HTTP-Referer": f"http://localhost:{APP_PORT}", "X-Title": "Python Coding Tutor"},
+        rejected_hint=(" Your OpenRouter connection was rejected or your account is out of credits: add credits or reconnect in AI settings."
+                       if own_account else " Your key may be invalid or out of credits."))
 
 
 def _llm_claude_cli(system, messages, max_tokens, json_mode=False):
@@ -239,10 +266,32 @@ def _llm_claude_cli(system, messages, max_tokens, json_mode=False):
     return p.stdout.strip()
 
 
-PROVIDERS = {"anthropic": _llm_anthropic, "openai": _llm_openai, "openrouter": _llm_openrouter, "claude-cli": _llm_claude_cli}
+PROVIDERS = {"llmgateway": _llm_llmgateway, "anthropic": _llm_anthropic, "openai": _llm_openai, "openrouter": _llm_openrouter,
+             "claude-cli": _llm_claude_cli}
+
+
+def shared_llm_available():
+    """Has the operator configured an LLM that all users may share?"""
+    if os.environ.get("TUTOR_LLM", "").lower() == "claude-cli":
+        return False  # one person's login; never shared in multi-user mode
+    return any(os.environ.get(v) for v in SHARED_KEY_VARS)
+
+
+def require_llm_access():
+    """Multi-user: raises 409 llm_not_connected unless this user has an AI to use (their own OpenRouter or a shared one)."""
+    uid = _uid_var.get()
+    if MULTIUSER and uid is not None and _byo and not _byo.credentials(uid) and (_byo.REQUIRE or not shared_llm_available()):
+        raise HTTPException(409, "llm_not_connected")
 
 
 def llm(system, messages, max_tokens=4000, json_mode=False):
+    uid = _uid_var.get()
+    if MULTIUSER and uid is not None and _byo:
+        creds = _byo.credentials(uid)
+        if creds:  # the user's own OpenRouter account: their cost, so the shared-budget limit doesn't apply
+            return _llm_openrouter(system, messages, max_tokens, json_mode, key=creds[0], model=creds[1])
+        if _byo.REQUIRE or not shared_llm_available():
+            raise HTTPException(409, "llm_not_connected")
     rate_limit_llm()
     provider = pick_provider()
     if provider not in PROVIDERS:
@@ -516,7 +565,7 @@ app = FastAPI(lifespan=lifespan)
 
 def setup_multiuser(app):
     """Everything that only exists in multi-user mode: sessions, OAuth routes, the Jupyter proxy, guards."""
-    global store, manager
+    global store, manager, _byo
     import auth
     import proxy
     from starlette.middleware.sessions import SessionMiddleware
@@ -534,6 +583,12 @@ def setup_multiuser(app):
     if not auth.providers():
         raise RuntimeError("No sign-in provider configured. Set GOOGLE_*, GITHUB_* and/or MICROSOFT_* client id/secret.")
     proxy.init(manager, BASE_URL)
+    if BYO_ENABLED:  # hidden for now: users connecting their own OpenRouter account (see byo.py)
+        import byo
+        byo.init(store, secret, shared_llm_available,
+                 lambda key, model: _llm_openrouter("Reply with the single word: ok", [{"role": "user", "content": "ping"}], 8, key=key, model=model))
+        _byo = byo
+        app.include_router(byo.router)
     auth.origin_guard(app, BASE_URL)
     auth.security_headers(app)
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="tutor_session", max_age=7 * 24 * 3600,
@@ -562,10 +617,10 @@ class Chat(BaseModel):
 @app.get("/api/me")
 def me(request: Request):
     if not MULTIUSER:
-        return {"mode": "local", "user": {"name": "You"}, "providers": []}
+        return {"mode": "local", "user": {"name": "You"}, "providers": [], "features": {}}
     u = _auth.session_user(request)
     user = {"name": u["name"] or u["email"] or "Learner", "avatar": u["avatar"], "provider": u["provider"]} if u else None
-    return {"mode": "multiuser", "user": user, "providers": _auth.providers()}
+    return {"mode": "multiuser", "user": user, "providers": _auth.providers(), "features": {"byo_llm": _byo is not None}}
 
 
 @app.get("/api/state")
@@ -581,6 +636,7 @@ def onboard(body: Onboard, user=Depends(current_user)):
         raise HTTPException(400, "Please describe your Python knowledge.")
     if len(body.text) > MAX_ONBOARD_CHARS:
         raise HTTPException(400, f"Please keep this under {MAX_ONBOARD_CHARS} characters.")
+    require_llm_access()  # don't start a notebook environment for someone who can't use the tutor yet
     with user_lock(uid):
         start_background_env(uid)
         s = default_state()

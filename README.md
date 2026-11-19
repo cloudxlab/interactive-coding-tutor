@@ -60,9 +60,9 @@ The tutor needs an AI to create problems and answer your questions. Pick **one**
 
 | Option | What you need | Cost |
 |---|---|---|
+| **LLM Gateway API key** (default) | An account at llmgateway.io (sign up with email, GitHub or Google) and an API key. One key gives access to many AI models. | Billed by LLM Gateway according to the plan and models you choose. |
 | **Anthropic (Claude) API key** | An account at console.anthropic.com | Pay-as-you-go. Typically a few cents per hour of practice. |
 | **OpenAI API key** | An account at platform.openai.com. (A ChatGPT subscription is *not* enough.) | Pay-as-you-go. Typically a few cents per hour of practice. |
-| **OpenRouter** | An account at openrouter.ai. You can sign in through your browser during setup (no key to copy), or paste a key. One account gives access to many models (Claude, GPT, Gemini and more), and some are free. | Pay-as-you-go, depending on the model you pick. |
 | **`claude` command line** | A paid Claude subscription (Pro or Max) and the Claude Code app installed and signed in | Covered by your subscription. No key to copy. |
 
 An **API key** is a long password-like text that lets the app use the AI on your account. Keep it private. Never share it or post it online.
@@ -182,7 +182,7 @@ Something else? The setup and launch windows print the error. Copy it and ask fo
 Want a shared version where people **sign in with Google, GitHub or Microsoft**, each with their own progress and
 their own isolated notebook environment? That is a separate, more advanced setup for whoever runs a server. Beginners
 using the tutor on their own computer don't need it. See **[docs/MULTIUSER.md](docs/MULTIUSER.md)** and run
-`python3 setup_multiuser.py`.
+`python3 setup_multiuser.py`. 
 
 ---
 
@@ -196,44 +196,23 @@ python3 -m venv .venv
 .venv/bin/python app.py                             # Windows: .venv\Scripts\python app.py
 ```
 
-**LLM backend** (auto-detected in this order, or force with `TUTOR_LLM=anthropic|openai|openrouter|claude-cli`):
-`ANTHROPIC_API_KEY` → `OPENAI_API_KEY` (needs `pip install openai`) → `OPENROUTER_API_KEY` → the `claude` command (uses your Claude Code login).
+**LLM backend** (auto-detected in this order, or force with `TUTOR_LLM=llmgateway|anthropic|openai|claude-cli`):
+`LLMGATEWAY_API_KEY` (default) → `ANTHROPIC_API_KEY` → `OPENAI_API_KEY` (needs `pip install openai`) → the `claude` command (uses your Claude Code login).
 
-### OpenRouter
+### LLM Gateway
 
-OpenRouter's OpenAI-compatible API is called directly over HTTPS (no extra package). Settings, in `.env` or your environment:
+[LLM Gateway](https://llmgateway.io) is an OpenAI-compatible API in front of many models. The app calls it directly over HTTPS (no extra package). Settings, in `.env` or your environment:
 
 | Variable | Meaning |
 |---|---|
-| `OPENROUTER_API_KEY` | your key (`sk-or-...`) |
-| `TUTOR_MODEL` | model id as `provider/model`, e.g. `anthropic/claude-sonnet-4.5` (default), `openai/gpt-4.1`. Browse <https://openrouter.ai/models> |
-| `OPENROUTER_BASE_URL` | optional, default `https://openrouter.ai/api/v1` |
+| `LLMGATEWAY_API_KEY` | your key (usually starts with `llmgtwy_`) |
+| `TUTOR_MODEL` | model id, default `gpt-4o`. List the ids your key can use with `LLMGATEWAY_API_KEY=... python llmgateway_models.py` |
+| `LLMGATEWAY_BASE_URL` | optional, default `https://api.llmgateway.io/v1` |
 
-Easiest path: run `./setup.sh` (or `setup.bat`) and choose **3) OpenRouter**.
-
-### OpenRouter OAuth helper (`openrouter_oauth.py`)
-
-Gets an API key by signing in with OpenRouter (OAuth **PKCE**). No copy/paste and no client secret. Standard library only.
-
-```
-python openrouter_oauth.py                # sign in, save OPENROUTER_API_KEY and TUTOR_LLM=openrouter to .env
-python openrouter_oauth.py --print-key    # sign in, print only the key (for scripts; setup.sh uses this)
-python openrouter_oauth.py --manual       # no local server: paste the code from the redirect URL
-python openrouter_oauth.py --no-browser   # print the sign-in URL instead of opening a browser
-python openrouter_oauth.py --env-file X   # save somewhere other than .env
-```
-
-How the flow works:
-1. The script creates a random `code_verifier` and sends its SHA-256 hash (`code_challenge`, method `S256`) to `https://openrouter.ai/auth?callback_url=...`.
-2. Your browser opens; you sign in and click **Authorize**.
-3. OpenRouter redirects to `http://localhost:3000/?code=...`, where the script is listening. (OpenRouter allows `http://localhost:3000` for development and requires https for everything else. If port 3000 is busy, free it or use `--manual`.)
-4. The script POSTs `{code, code_verifier, code_challenge_method}` to `https://openrouter.ai/api/v1/auth/keys` and receives `{"key": "sk-or-..."}`.
-5. The key is written to `.env` (other lines preserved, file mode 600).
-
-To build a *hosted* app that signs users in with OpenRouter, reuse `make_pkce()`, `build_auth_url()` and `exchange_code()` from that file, and register an https `callback_url` on your own domain.
+Easiest path: run `./setup.sh` (or `setup.bat`) and press Enter at the first question. It guides you to the key, verifies it, and lists the models you can choose from.
 
 **Environment variables:** `TUTOR_PORT` (8765), `TUTOR_JUPYTER_PORT` (8766), `TUTOR_MODEL` (optional model override).
 
-**Files:** `app.py` (backend + AI + JupyterLab launcher), `runner.py` (runs your code and the tests in a separate process), `static/index.html` (the web UI), `openrouter_oauth.py` (OpenRouter sign-in helper), `setup.sh`/`launch.sh` (Mac/Linux), `store.py` `auth.py` `proxy.py` `sandbox.py` (multi-user mode), `setup.ps1`/`launch.ps1` + `.bat` wrappers (Windows). Progress is saved in `state.json`, notebooks in `workspace/`, your settings and key in `.env` (not committed to git).
+**Files:** `app.py` (backend + AI + JupyterLab launcher), `runner.py` (runs your code and the tests in a separate process), `static/index.html` (the web UI), `llmgateway_models.py` (checks a key and lists models), `setup.sh`/`launch.sh` (Mac/Linux), `store.py` `auth.py` `proxy.py` `sandbox.py` (multi-user mode), `setup.ps1`/`launch.ps1` + `.bat` wrappers (Windows). Progress is saved in `state.json`, notebooks in `workspace/`, your settings and key in `.env` (not committed to git).
 
 **Notes:** your code runs locally in a plain subprocess with no sandbox, which is fine for a single-user local tool. Tests run on the *saved* notebook file. The Windows scripts are newer than the Mac/Linux ones, so please report any problems.

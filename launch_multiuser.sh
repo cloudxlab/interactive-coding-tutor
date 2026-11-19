@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 [ -f .env.multiuser ] || { echo "No .env.multiuser found. Run: python3 setup_multiuser.py"; exit 1; }
 [ -x .venv/bin/python ] || { echo "Run ./setup.sh first (creates .venv)."; exit 1; }
-.venv/bin/python -c "import authlib, itsdangerous, httpx, websockets" 2>/dev/null || .venv/bin/pip install -q -r requirements.txt
+.venv/bin/python -c "import authlib, itsdangerous, httpx, websockets, cryptography" 2>/dev/null || .venv/bin/pip install -q -r requirements.txt
 
 set -a; . ./.env.multiuser; set +a   # values are single-quoted by the setup script
 export TUTOR_MODE=multiuser

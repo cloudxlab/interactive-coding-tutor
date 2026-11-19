@@ -57,12 +57,44 @@
   #login .prov:hover { background: #f3f5f7; }
   #who { font-size: 12px; color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: none; }
   #logout { display: none; }
+  #llmgate { position: fixed; inset: 0; background: var(--bg); display: none; align-items: center; justify-content: center; z-index: 9; }
+  #llmgate .card, #llmpanel .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 28px; width: min(480px, 92vw); }
+  #llmgate h2, #llmpanel h3 { margin-top: 0; }
+  a.btn { display: inline-block; text-decoration: none; background: var(--accent); color: #fff; padding: 10px 18px; border-radius: 8px; font-weight: 600; }
+  a.btn:hover { background: #1f5fd8; }
+  .fine { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  #llmpanel { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 8; }
+  #llmpanel input { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; margin: 6px 0; }
+  #llmpanel .row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  #toast { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: #1a7f37; color: #fff; padding: 8px 16px; border-radius: 8px; z-index: 20; display: none; }
+  #aibtn { display: none; }
   .err-banner { color: var(--bad); margin-top: 8px; }
   .spin::after { content: ""; display: inline-block; width: 12px; height: 12px; margin-left: 8px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: s .7s linear infinite; vertical-align: -2px; }
   @keyframes s { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
+<div id="toast"></div>
+
+<div id="llmgate">
+  <div class="card">
+    <h2>Connect your AI</h2>
+    <p>This tutor uses <b>your own OpenRouter account</b> for the AI, so you stay in control of the model and the cost.</p>
+    <p><a class="btn" href="/openrouter/connect">Connect with OpenRouter</a></p>
+    <p class="fine">You'll be taken to OpenRouter to approve access and brought straight back. There is nothing to copy or paste.
+      You can disconnect any time here, or revoke access at openrouter.ai/settings/keys. New to OpenRouter? Create a free account there first and add a few dollars of credit (many models are cheap).</p>
+    <div id="gate-err" class="err-banner"></div>
+  </div>
+</div>
+
+<div id="llmpanel">
+  <div class="card">
+    <h3>AI settings</h3>
+    <div id="llmbody"></div>
+    <div class="row"><button id="llmclose">Close</button></div>
+  </div>
+</div>
+
 <div id="login">
   <div class="card">
     <h2>🐍 Python Coding Tutor</h2>
@@ -90,6 +122,7 @@
       <span id="who"></span>
       <button id="kbtn">My knowledge</button>
       <button id="reset" title="Start over">↺</button>
+      <button id="aibtn" title="AI settings">AI</button>
       <button id="logout" title="Sign out">Sign out</button>
     </header>
     <div id="knowledge"></div>
@@ -138,6 +171,10 @@ function md(src) {
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (r.status === 401) { showLogin(); throw new Error('Please sign in.'); }
+  if (r.status === 409) {
+    let d = ''; try { d = (await r.clone().json()).detail; } catch {}
+    if (d === 'llm_not_connected') { llmStatus = { ...(llmStatus || {}), connected: false }; showGate(); throw new Error('Connect your AI to continue.'); }
+  }
   if (!r.ok) {
     let d = r.statusText;
     try { d = (await r.json()).detail || d; } catch {}
@@ -246,7 +283,49 @@ $('divider').onmousedown = e => {
   document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); e.preventDefault();
 };
 
-let me = null;
+let me = null, llmStatus = null;
+const LLM_ERRORS = {
+  denied: 'Access was not approved on OpenRouter. You can try again.',
+  expired: 'That took too long or was opened twice. Please click Connect again.',
+  failed: 'OpenRouter could not complete the connection. Please try again.',
+  session: 'Please sign in first, then connect.',
+};
+
+function showToast(msg) { $('toast').textContent = msg; $('toast').style.display = 'block'; setTimeout(() => $('toast').style.display = 'none', 3500); }
+
+function showGate(errKey) {
+  $('app').classList.remove('on'); $('onboard').style.display = 'none'; $('llmgate').style.display = 'flex';
+  $('gate-err').textContent = errKey ? (LLM_ERRORS[errKey] || LLM_ERRORS.failed) : '';
+}
+
+function renderLlmPanel() {
+  const st = llmStatus, models = (st.suggested_models || []).map(m => `<option value="${esc(m)}">`).join('');
+  if (st.connected) {
+    $('llmbody').innerHTML = `<p>Using <b>your OpenRouter account</b> · model <code>${esc(st.model)}</code></p>
+      <label class="fine">Model (provider/model, see openrouter.ai/models)</label>
+      <input id="modelinput" list="modellist" value="${esc(st.model)}" spellcheck="false"><datalist id="modellist">${models}</datalist>
+      <div id="modelmsg" class="err-banner"></div>
+      <div class="row"><button class="primary" id="modelsave">Save model</button><button id="disconnect">Disconnect OpenRouter</button></div>`;
+    $('modelsave').onclick = async () => {
+      $('modelsave').disabled = true; $('modelsave').textContent = 'Testing…'; $('modelmsg').textContent = '';
+      try { llmStatus = await post('/api/llm/model', { model: $('modelinput').value }); showToast('Model saved'); renderLlmPanel(); }
+      catch (e) { $('modelmsg').textContent = e.message; $('modelsave').disabled = false; $('modelsave').textContent = 'Save model'; }
+    };
+    $('disconnect').onclick = async () => {
+      if (!confirm('Disconnect your OpenRouter account from this tutor?')) return;
+      llmStatus = await post('/api/llm/disconnect');
+      $('llmpanel').style.display = 'none';
+      if (llmStatus.require_byo) showGate(); else showToast('Disconnected. Using the shared tutor AI.');
+    };
+  } else {
+    $('llmbody').innerHTML = `<p>${st.shared_available ? 'Using the <b>shared tutor AI</b>. You can use your own OpenRouter account instead.' : 'Not connected.'}</p>
+      <p><a class="btn" href="/openrouter/connect">Connect with OpenRouter</a></p>
+      <p class="fine">You'll approve access on OpenRouter and be brought straight back.</p>`;
+  }
+}
+
+$('aibtn').onclick = async () => { llmStatus = await api('/api/llm'); renderLlmPanel(); $('llmpanel').style.display = 'flex'; };
+$('llmclose').onclick = () => { $('llmpanel').style.display = 'none'; };
 const LOGIN_ERRORS = { failed: 'Sign-in failed. Please try again.', denied: 'This account is not allowed to use this tutor.' };
 
 function showLogin() {
@@ -266,6 +345,16 @@ async function start() {
     $('who').textContent = me.user.name; $('who').style.display = 'inline'; $('logout').style.display = '';
   }
   $('login').style.display = 'none';
+  if (me.mode === 'multiuser' && me.features?.byo_llm) {   // hidden unless the server enables it
+    $('aibtn').style.display = '';
+    llmStatus = await api('/api/llm');
+    const qs = new URLSearchParams(location.search);
+    const flashed = qs.get('llm'), llmErr = qs.get('llm_error');
+    if (flashed || llmErr) history.replaceState(null, '', '/');
+    if (llmStatus.require_byo && !llmStatus.connected) { showGate(llmErr); return; }
+    if (flashed === 'connected') showToast('OpenRouter connected. Pick a model any time under AI.');
+    else if (llmErr) showToast(LLM_ERRORS[llmErr] || LLM_ERRORS.failed);
+  }
   state = await api('/api/state'); show();
 }
 start().catch(e => console.error(e));

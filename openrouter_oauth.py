@@ -35,9 +35,13 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-AUTH_URL = "https://openrouter.ai/auth"
-DEFAULT_API_BASE = "https://openrouter.ai/api/v1"
+AUTH_URL = os.environ.get("OPENROUTER_AUTH_URL", "https://openrouter.ai/auth")
+DEFAULT_API_BASE = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 ENV_FILE = Path(__file__).parent / ".env"
+
+
+class OpenRouterError(RuntimeError):
+    """The code exchange failed. (A library error, not SystemExit, so web handlers can catch it.)"""
 
 
 def log(*a):
@@ -99,8 +103,8 @@ def wait_for_code(port, path, timeout):
     return result["code"]
 
 
-def exchange_code(code, verifier, api_base):
-    """POST /auth/keys -> {"key": "sk-or-..."}"""
+def exchange_code(code, verifier, api_base=DEFAULT_API_BASE):
+    """POST /auth/keys -> {"key": "sk-or-..."}. Raises OpenRouterError on any failure."""
     body = json.dumps({"code": code, "code_verifier": verifier, "code_challenge_method": "S256"}).encode()
     req = urllib.request.Request(api_base.rstrip("/") + "/auth/keys", data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
@@ -108,13 +112,13 @@ def exchange_code(code, verifier, api_base):
         with urllib.request.urlopen(req, timeout=30) as r:
             data = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise SystemExit(f"OpenRouter rejected the code (HTTP {e.code}): {e.read().decode('utf-8', 'replace')[:300]}\n"
-                         "The code is single-use and short-lived; run the script again.")
+        raise OpenRouterError(f"OpenRouter rejected the code (HTTP {e.code}): {e.read().decode('utf-8', 'replace')[:300]}\n"
+                              "The code is single-use and short-lived; run the script again.")
     except Exception as e:
-        raise SystemExit(f"Could not reach OpenRouter: {e}")
+        raise OpenRouterError(f"Could not reach OpenRouter: {e}")
     key = data.get("key")
     if not key:
-        raise SystemExit(f"Unexpected response from OpenRouter: {str(data)[:300]}")
+        raise OpenRouterError(f"Unexpected response from OpenRouter: {str(data)[:300]}")
     return key
 
 
@@ -179,7 +183,10 @@ def main():
         log(f"Waiting for the redirect on {callback} ...")
         code = wait_for_code(args.port, cb_path, args.timeout)
 
-    key = exchange_code(code, verifier, args.api_base)
+    try:
+        key = exchange_code(code, verifier, args.api_base)
+    except OpenRouterError as e:
+        raise SystemExit(str(e))
     if args.print_key:
         print(key)
         return
